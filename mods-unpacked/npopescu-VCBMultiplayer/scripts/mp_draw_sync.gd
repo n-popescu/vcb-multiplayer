@@ -72,7 +72,6 @@ func _ready():
 		E.sm_next_step_request,
 		E.sm_prev_step_request,
 		E.sm_skip_iterations_step_change,
-		E.sm_mouse_override_mode_change_tw,
 		E.sm_telemtry_change,
 	])
 	# Sync SHARED circuit/project settings. Clock interval, timer interval and the random
@@ -342,6 +341,13 @@ func _ev_mi_mouse_input_on_board(_mode: int, args: Dictionary):
 	if not args.has(E.mi_mouse_input_on_board.p_position):
 		return
 	_maybe_sync_remote_cursor(args[E.mi_mouse_input_on_board.p_position])
+	# In simulation, board clicks are mouse OVERRIDES (interacting with the live circuit), not
+	# draws. Mirror them on their own path carrying the sender's interaction mode, and DON'T fall
+	# through to the drawing sync (which would replay the click with the peer's OWN mode, and
+	# could even leak the click onto the peer's board as a remote stroke).
+	if _is_simulating():
+		_maybe_broadcast_sim_override(args)
+		return
 	if not _should_sync_input(args):
 		return
 	if not _is_sync_tool():
@@ -622,8 +628,9 @@ func _apply_remote_event(event_name: String, payload: Dictionary):
 	# remote engine's is_continue — one peer kept free-running while the other was in step mode; and
 	# because a step only takes effect while paused, next/prev step were dropped on the peer too.
 	# ORDER carries the sender's confirmed p_is_pressed, so both peers converge; the target then
-	# echoes to refresh its own UI. This generalizes the pause fix (#46) to every _tw event, so the
-	# mouse-override-mode toggle (same bug) crosses to the peer as well.
+	# echoes to refresh its own UI. This generalizes the pause fix (#46) to every _tw event still
+	# broadcast here (now just the pause toggle). The mouse-override-mode toggle is no longer
+	# broadcast: the sim interaction mode is per-player, carried per click (see _rpc_apply_sim_click).
 	if event_name.ends_with("_tw"):
 		E.emit_signal(event_name, E.ORDER, payload)
 	else:
@@ -1040,16 +1047,60 @@ func _ev_sm_skip_iterations_step_change(_mode: int, _args: Dictionary):
 	_broadcast_event("sm_skip_iterations_step_change", {E.sm_skip_iterations_step_change.p_step: step})
 
 
-func _ev_sm_mouse_override_mode_change_tw(_mode: int, _args: Dictionary):
+# === Simulation mouse-override (in-sim board clicks) =======================================
+# While the sim runs, a board click is a "mouse override": it toggles / presses a latch in the LIVE
+# circuit rather than drawing. VCB has two interaction modes (toggle vs press-and-hold) and that mode
+# is a PER-PLAYER preference, so the click carries the SENDER's mode and the peer applies it with
+# that mode (see Simulator.apply_remote_sim_click): a toggle-mode player's click toggles on both
+# boards, a press-mode player's press/release forces the latch on/off on both, regardless of the
+# other player's own mode. Both boards then hold the same override_set, so the deterministic engines
+# stay in lockstep. (The mode toggle itself is no longer broadcast; it is per-player, carried per
+# click.)
+func _is_simulating() -> bool:
+	var sim = _get_simulator()
+	return sim != null and sim.is_run
+
+
+func _maybe_broadcast_sim_override(args: Dictionary) -> void:
 	if _is_applying_remote_input or not _has_network_peer():
 		return
-	# Same shape as the pause toggle: mirror the CONFIRMED state (the simulator's ECHO after it flips
-	# the mode), not the ASK request — otherwise a stale value is sent right behind the correct one.
-	# The remote applies it as ORDER (see _apply_remote_event) since the simulator ignores ECHO here.
-	if not _mode & E.ECHO:
+	var is_just_pressed = bool(args.get(E.mi_mouse_input_on_board.p_is_just_pressed, false))
+	var is_just_released = bool(args.get(E.mi_mouse_input_on_board.p_is_just_released, false))
+	# Only a press (both modes) or a release (press mode's momentary-off) changes an override.
+	if not is_just_pressed and not is_just_released:
 		return
-	var is_pressed = bool(_args.get(E.sm_mouse_override_mode_change_tw.p_is_pressed, false))
-	_broadcast_event("sm_mouse_override_mode_change_tw", {E.sm_mouse_override_mode_change_tw.p_is_pressed: is_pressed})
+	var sim = _get_simulator()
+	if sim == null:
+		return
+	var position = args.get(E.mi_mouse_input_on_board.p_position, Vector2.ZERO)
+	var payload = {
+		E.mi_mouse_input_on_board.p_position: Vector2(int(position.x), int(position.y)),
+		E.mi_mouse_input_on_board.p_is_just_pressed: is_just_pressed,
+		E.mi_mouse_input_on_board.p_is_just_released: is_just_released,
+		"p_is_toggle_mode": bool(sim.is_override_toggle_mode),
+	}
+	for peer_id in _get_remote_peer_ids():
+		rpc_id(peer_id, "_rpc_apply_sim_click", payload)
+
+
+remote func _rpc_apply_sim_click(payload: Dictionary) -> void:
+	if payload == null or not payload.has(E.mi_mouse_input_on_board.p_position):
+		return
+	var sim = _get_simulator()
+	if sim == null or not sim.has_method("apply_remote_sim_click"):
+		return
+	var sender = get_tree().get_rpc_sender_id()
+	var position = payload[E.mi_mouse_input_on_board.p_position] as Vector2
+	var is_just_pressed = bool(payload.get(E.mi_mouse_input_on_board.p_is_just_pressed, false))
+	var is_just_released = bool(payload.get(E.mi_mouse_input_on_board.p_is_just_released, false))
+	var is_toggle_mode = bool(payload.get("p_is_toggle_mode", true))
+	# Surface where the remote is interacting (reuses the green remote cursor sprite).
+	if not _remote_cursor_sprite:
+		_resolve_remote_cursor_sprite()
+	if _remote_cursor_sprite:
+		_remote_cursor_sprite.position = position.floor()
+		_remote_cursor_sprite.visible = true
+	sim.apply_remote_sim_click(sender, position, is_just_pressed, is_just_released, is_toggle_mode)
 
 
 # Shared circuit/project component settings (clock/timer/random feed the deterministic engine;
