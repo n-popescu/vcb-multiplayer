@@ -32,6 +32,14 @@ build** of the mod. It is **pure GDScript + assets** — it loads at runtime fro
 - Undo/redo is host-authoritative and shared. The Multiplayer window's **DEBUG** section has a
   host-only "Recheck board sync" (tiled anti-entropy) and a "Reset undo/redo history" button.
 
+## Mod compatibility
+
+Because the two peers run a shared **deterministic** simulation, they must have the **same mods at
+the same versions** or they'd desync. On connect, the host and joiner exchange a mod fingerprint
+(this mod's version plus the full Mod Loader mod list with versions). If they don't match — or if
+one side runs an older multiplayer mod without this handshake — the join is refused with a message
+saying which mods/versions differ. So make sure both players have the identical mod set installed.
+
 ## How the mod is structured
 
 The whole-`vcb.pck` build changed the game three ways: (a) editing stock game scripts,

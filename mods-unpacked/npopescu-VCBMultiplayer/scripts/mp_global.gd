@@ -41,6 +41,18 @@ var upnp: UPNP
 var _is_applying_local_mode_change: bool = false
 var _is_applying_remote_mode_change: bool = false
 
+# --- Mod-compatibility guard ----------------------------------------------------------------
+# A joiner may only stay in the session if its installed mod set + versions EXACTLY match the
+# host's. On connect the two peers exchange a "mod fingerprint" (this mod's version + the full
+# Mod Loader mod list with versions); each compares it to its own and, on any mismatch — or if
+# the other side never sends one within the timeout (e.g. an older multiplayer mod without this
+# handshake) — the connection is refused with a clear reason. This keeps the deterministic
+# lockstep valid: two peers running different mods/versions would desync.
+const MOD_COMPAT_TIMEOUT_SEC: float = 8.0
+var _host_verify_peer: int = 0        # peer id the host is still waiting to verify (0 = none)
+var _host_verify_token: int = 0
+var _join_verify_token: int = 0
+
 func _ready():
 	var name_file = File.new()
 	if name_file.file_exists("user://mp_name.dat"):
@@ -276,6 +288,7 @@ func _start_join_timeout() -> void:
 
 func _fail_join(reason: String) -> void:
 	_join_token += 1  # invalidate any pending timeout
+	_join_verify_token += 1  # invalidate any pending mod-compat timeout
 	is_connecting = false
 	is_connected = false
 	is_game_started = false
@@ -302,6 +315,11 @@ func _on_connected_to_server() -> void:
 	# Tell the host our name (in case we don't also get a network_peer_connected for id 1).
 	rpc_id(1, "_receive_player_name", my_id, player_name)
 
+	# Mod-compatibility handshake: send the host our mod fingerprint and start waiting for the
+	# host's reply (if none arrives, the host is incompatible/outdated and we bail).
+	rpc_id(1, "_rpc_submit_mod_fingerprint", my_id, _local_mod_fingerprint())
+	_begin_join_verify()
+
 	var fs := _find_file_system()
 	if fs and fs.has_method("new_file"):
 		fs.new_file()
@@ -319,6 +337,9 @@ func _on_connection_failed_to_server() -> void:
 
 func leave_game():
 	_join_token += 1  # cancel any in-flight join timeout
+	_join_verify_token += 1  # cancel any in-flight mod-compat timeout
+	_host_verify_token += 1
+	_host_verify_peer = 0
 	if peer:
 		peer.close_connection()
 		peer = null
@@ -344,6 +365,9 @@ func _on_network_peer_connected(id: int):
 	# (both ends run this on the mutual connect, so names flow both ways).
 	rpc_id(id, "_receive_player_name", my_id, player_name)
 	emit_signal("player_connected", id)
+	# Host: start the mod-compatibility check for this joiner (kicked if it doesn't verify).
+	if is_host:
+		_begin_host_verify(id)
 
 
 func _on_network_peer_disconnected(id: int):
@@ -365,6 +389,9 @@ func start_game():
 	print("[MP] start_game called, is_host: ", is_host)
 	emit_status("Starting game...")
 	if is_host:
+		if _host_verify_peer != 0:
+			emit_status("Waiting for the other player's mod-compatibility check…")
+			return
 		is_game_started = true
 		emit_signal("game_started")
 		emit_status("Game started!  You can now collaborate on the circuit.")
@@ -384,3 +411,174 @@ remote func on_mode_change_requested(is_simulation_requested: bool):
 	_is_applying_remote_mode_change = true
 	E.emit_signal("mi_mode_change_requested", is_simulation_requested)
 	_is_applying_remote_mode_change = false
+
+
+# === Mod-compatibility guard ===
+
+# {"mp": <this mod's version>, "mods": {mod_id: version, …}} — the installed mod set + versions
+# reported by the Godot Mod Loader. With no Mod Loader (the whole-vcb.pck build) "mods" is empty
+# and only the mp version (read from the packed manifest) is compared.
+func _local_mod_fingerprint() -> Dictionary:
+	var fp := {"mp": _read_mp_version(), "mods": {}}
+	var store = get_tree().root.get_node_or_null("/root/ModLoaderStore")
+	if store != null:
+		var mod_data = store.get("mod_data")
+		if typeof(mod_data) == TYPE_DICTIONARY:
+			for mod_id in mod_data:
+				fp["mods"][str(mod_id)] = _mod_version(str(mod_id), mod_data[mod_id])
+	return fp
+
+
+# A mod's version: prefer its manifest mounted at res://mods-unpacked/<id>/ (reliable across
+# loader versions), else the loader's in-memory ModData.manifest.version_number.
+func _mod_version(mod_id: String, md) -> String:
+	var v := _read_json_field("res://mods-unpacked/" + mod_id + "/manifest.json", ["version_number", "version"])
+	if v != "":
+		return v
+	if md != null and md is Object:
+		var mani = md.get("manifest")
+		if mani != null and mani is Object:
+			var mv = mani.get("version_number")
+			if mv != null:
+				return str(mv)
+	return "?"
+
+
+func _read_mp_version() -> String:
+	var v := _read_json_field("res://mods-unpacked/npopescu-VCBMultiplayer/manifest.json", ["version_number"])
+	if v != "":
+		return v
+	v = _read_json_field("res://mod.json", ["version"])
+	if v != "":
+		return v
+	return "unknown"
+
+
+func _read_json_field(path: String, keys: Array) -> String:
+	var f := File.new()
+	if not f.file_exists(path):
+		return ""
+	if f.open(path, File.READ) != OK:
+		return ""
+	var txt := f.get_as_text()
+	f.close()
+	var parsed := JSON.parse(txt)
+	if parsed.error != OK or typeof(parsed.result) != TYPE_DICTIONARY:
+		return ""
+	var d: Dictionary = parsed.result
+	for k in keys:
+		if d.has(k):
+			return str(d[k])
+	return ""
+
+
+# A stable, order-independent string form of a fingerprint, for equality + logging.
+func _fingerprint_signature(fp) -> String:
+	if typeof(fp) != TYPE_DICTIONARY:
+		return ""
+	var parts := PoolStringArray()
+	parts.append("mp=" + str(fp.get("mp", "")))
+	var mods = fp.get("mods", {})
+	if typeof(mods) == TYPE_DICTIONARY:
+		var ids: Array = mods.keys()
+		ids.sort()
+		for mod_id in ids:
+			parts.append(str(mod_id) + "=" + str(mods[mod_id]))
+	return parts.join(";")
+
+
+func _describe_mod_mismatch(host_fp, join_fp) -> String:
+	var msg := "Incompatible setup — the host and joiner must have the exact same mods and versions."
+	if typeof(host_fp) != TYPE_DICTIONARY or typeof(join_fp) != TYPE_DICTIONARY:
+		return msg
+	var diffs := []
+	if str(host_fp.get("mp", "")) != str(join_fp.get("mp", "")):
+		diffs.append("multiplayer mod (host " + str(host_fp.get("mp", "")) + ", joiner " + str(join_fp.get("mp", "")) + ")")
+	var hm = host_fp.get("mods", {})
+	var jm = join_fp.get("mods", {})
+	if typeof(hm) != TYPE_DICTIONARY:
+		hm = {}
+	if typeof(jm) != TYPE_DICTIONARY:
+		jm = {}
+	var ids := {}
+	for k in hm.keys():
+		ids[str(k)] = true
+	for k in jm.keys():
+		ids[str(k)] = true
+	var id_list: Array = ids.keys()
+	id_list.sort()
+	for mod_id in id_list:
+		var hv: String = str(hm[mod_id]) if hm.has(mod_id) else "(absent)"
+		var jv: String = str(jm[mod_id]) if jm.has(mod_id) else "(absent)"
+		if hv != jv:
+			diffs.append(str(mod_id) + " (host " + hv + ", joiner " + jv + ")")
+	if not diffs.empty():
+		msg += " Differences: " + PoolStringArray(diffs).join(", ")
+	return msg
+
+
+# Host: kick this peer after MOD_COMPAT_TIMEOUT_SEC if it never verifies (old/other mod).
+func _begin_host_verify(id: int) -> void:
+	_host_verify_peer = id
+	_host_verify_token += 1
+	var token: int = _host_verify_token
+	yield(get_tree().create_timer(MOD_COMPAT_TIMEOUT_SEC), "timeout")
+	if token != _host_verify_token:
+		return
+	if is_host and _host_verify_peer == id and connected_players.has(id):
+		_reject_peer(id, "The joining player didn't complete the mod-compatibility check (likely an older or different multiplayer mod).")
+
+
+# Joiner: bail after MOD_COMPAT_TIMEOUT_SEC if the host never sends its fingerprint back.
+func _begin_join_verify() -> void:
+	_join_verify_token += 1
+	var token: int = _join_verify_token
+	yield(get_tree().create_timer(MOD_COMPAT_TIMEOUT_SEC), "timeout")
+	if token != _join_verify_token:
+		return
+	if is_connected and not is_host:
+		_fail_join("The host is running an incompatible or older multiplayer mod (no mod-compatibility handshake).")
+
+
+# Host: a joiner sent its mod fingerprint. Compare to ours; confirm or kick.
+remote func _rpc_submit_mod_fingerprint(pid: int, join_fp) -> void:
+	if not is_host:
+		return
+	var host_fp := _local_mod_fingerprint()
+	if _fingerprint_signature(join_fp) == _fingerprint_signature(host_fp):
+		if _host_verify_peer == int(pid):
+			_host_verify_peer = 0
+			_host_verify_token += 1  # cancel the kick timer
+		rpc_id(int(pid), "_rpc_host_fingerprint", host_fp)
+	else:
+		_reject_peer(int(pid), _describe_mod_mismatch(host_fp, join_fp))
+
+
+# Joiner: the host judged us compatible and sent its fingerprint. Double-check on our side.
+remote func _rpc_host_fingerprint(host_fp) -> void:
+	_join_verify_token += 1  # heard back — cancel the "no handshake" timeout
+	var my_fp := _local_mod_fingerprint()
+	if _fingerprint_signature(host_fp) != _fingerprint_signature(my_fp):
+		_fail_join(_describe_mod_mismatch(host_fp, my_fp))
+
+
+# Host → joiner: you're refused, here's why (shown via connection_failed).
+remote func _rpc_incompatible(reason: String) -> void:
+	_fail_join(reason)
+
+
+func _reject_peer(pid: int, reason: String) -> void:
+	emit_status("Refused incompatible player " + str(pid) + ": " + reason)
+	if _host_verify_peer == int(pid):
+		_host_verify_peer = 0
+		_host_verify_token += 1
+	if get_tree().network_peer != null:
+		rpc_id(int(pid), "_rpc_incompatible", reason)
+	connected_players.erase(int(pid))
+	player_names.erase(int(pid))
+	emit_signal("player_disconnected", int(pid))
+	emit_signal("roster_updated")
+	# Give ENet a moment to flush the reason before dropping the peer.
+	yield(get_tree().create_timer(0.5), "timeout")
+	if peer != null and is_host:
+		peer.disconnect_peer(int(pid))
