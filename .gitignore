@@ -1,0 +1,6 @@
+# Build artifact produced by build.sh / CI
+npopescu-VCBMultiplayer.zip
+dist/
+
+# OS cruft
+.DS_Store
