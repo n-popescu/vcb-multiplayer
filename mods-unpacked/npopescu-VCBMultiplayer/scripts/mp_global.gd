@@ -38,6 +38,13 @@ signal roster_updated
 
 var upnp_external_ip: String = ""
 var upnp: UPNP
+# UPnP runs on a worker thread. Its discover()/add_port_mapping() calls are synchronous and block
+# the caller (Godot's UPNP has no async API), so the documented pattern is to run them off the main
+# loop — otherwise hosting freezes for the whole discover timeout while the gateway is probed.
+# _upnp_port_mapped records whether we actually added a mapping so leave_game() can delete it again
+# (the vanilla code leaked one router mapping per host and never checked add_port_mapping's result).
+var _upnp_thread: Thread = null
+var _upnp_port_mapped: bool = false
 var _is_applying_local_mode_change: bool = false
 var _is_applying_remote_mode_change: bool = false
 
@@ -69,6 +76,12 @@ func _ready():
 	get_tree().connect("connected_to_server", self, "_on_connected_to_server")
 	get_tree().connect("connection_failed", self, "_on_connection_failed_to_server")
 	E.follow_events(self, [E.mi_mode_change_requested])
+
+
+func _exit_tree() -> void:
+	# On quit, join any running UPnP probe and drop the port mapping so we don't leave a stale
+	# router mapping behind or a thread undisposed (Godot warns about the latter).
+	_teardown_upnp()
 
 
 func emit_status(text: String):
@@ -190,9 +203,12 @@ func host_game() -> bool:
 	player_names.clear()
 	player_names[1] = player_name
 	
-	# Get external IP (tries UPnP first, falls back to local)
-	upnp_external_ip = get_external_ip()
-	emit_status("HOST OK! IP: " + upnp_external_ip)
+	# Show the LAN IP immediately, then probe UPnP for a public IP + port forward on a worker
+	# thread (its calls block; see _upnp_setup). When it finishes it updates upnp_external_ip and
+	# emits a status, which refreshes the MP window.
+	upnp_external_ip = get_local_ip()
+	emit_status("HOST OK! LAN IP: " + upnp_external_ip)
+	_start_upnp_setup()
 
 
 	# MP: start every session on a fresh board (before we join our own relay, so no stray
@@ -209,32 +225,71 @@ func _find_file_system() -> Node:
 	return main.find_node("FileSystem", true, false) if main else null
 
 
-func get_external_ip() -> String:
-	emit_status("Trying UPnP...")
-	# Try UPnP first for public IP
-	upnp = UPNP.new()
-	var err = upnp.discover(2000)
-	emit_status("UPnP discover result: " + str(err))
-	
-	if err == OK:
-		var gateway = upnp.get_gateway()
-		emit_status("Gateway: " + str(gateway))
-		
-		if gateway and gateway.is_valid_gateway():
-			emit_status("Gateway valid, adding port mapping...")
-			upnp.add_port_mapping(port, port, "VCB-MP", "UDP")
-			var external_ip = upnp.query_external_address()
-			emit_status("External IP from UPnP: " + external_ip)
-			if external_ip != "":
-				return external_ip
-		else:
-			emit_status("Gateway not valid")
+func _start_upnp_setup() -> void:
+	# Kick off discovery + port mapping on a worker thread so hosting never blocks on a slow or
+	# absent gateway (discover() alone blocks the whole timeout). Godot's UPNP API is synchronous
+	# only, so a thread is the documented way to keep it off the main loop.
+	if _upnp_thread != null:
+		return
+	emit_status("Probing UPnP…")
+	_upnp_thread = Thread.new()
+	var _e = _upnp_thread.start(self, "_upnp_setup", port)
+
+
+func _upnp_setup(p_port: int) -> void:
+	# WORKER THREAD — touch only locals and the fresh UPNP object here; hand the result back to the
+	# main thread via call_deferred (never emit signals or touch the scene tree from a thread).
+	var u: = UPNP.new()
+	var discover_err: int = u.discover()
+	if discover_err != OK:
+		call_deferred("_on_upnp_finished", discover_err, "", false, u)
+		return
+	var gateway = u.get_gateway()
+	if gateway == null or not gateway.is_valid_gateway():
+		call_deferred("_on_upnp_finished", ERR_UNAVAILABLE, "", false, u)
+		return
+	# ENet is UDP; map external == internal port. add_port_mapping returns a UPNPResult that MUST be
+	# checked: a valid gateway can still refuse the mapping, and querying/reporting an external IP
+	# then would tell the host it is reachable when the port is actually closed.
+	var map_result: int = u.add_port_mapping(p_port, p_port, "VCB-MP", "UDP", 0)
+	var mapped: bool = map_result == UPNP.UPNP_RESULT_SUCCESS
+	var external_ip: = ""
+	if mapped:
+		external_ip = u.query_external_address()
+	call_deferred("_on_upnp_finished", (OK if mapped else map_result), external_ip, mapped, u)
+
+
+func _on_upnp_finished(result: int, external_ip: String, mapped: bool, u) -> void:
+	# MAIN THREAD (via call_deferred). Join the worker and adopt its result.
+	if _upnp_thread != null:
+		_upnp_thread.wait_to_finish()
+		_upnp_thread = null
+	upnp = u
+	_upnp_port_mapped = mapped
+	# If the session ended while we were probing, drop the mapping instead of keeping it.
+	if not is_host:
+		_teardown_upnp()
+		return
+	if mapped and external_ip != "":
+		upnp_external_ip = external_ip
+		emit_status("UPnP: forwarded UDP " + str(port) + " — public IP " + external_ip)
+	elif result != OK:
+		emit_status("UPnP unavailable (err " + str(result) + ") — using LAN IP " + upnp_external_ip + "; forward UDP " + str(port) + " manually for internet play")
 	else:
-		emit_status("UPnP discover failed")
-	
-	# Fallback to local IP
-	emit_status("Falling back to local IP")
-	return get_local_ip()
+		emit_status("UPnP: no port mapping — using LAN IP " + upnp_external_ip)
+
+
+func _teardown_upnp() -> void:
+	# Join any in-flight probe, then remove the mapping we added (the vanilla code never did, so it
+	# leaked a router mapping every time you hosted). Deletion blocks briefly but only runs on
+	# leave/quit, so it never affects gameplay.
+	if _upnp_thread != null:
+		_upnp_thread.wait_to_finish()
+		_upnp_thread = null
+	if upnp != null and _upnp_port_mapped:
+		var _d = upnp.delete_port_mapping(port, "UDP")
+	_upnp_port_mapped = false
+	upnp = null
 
 
 func get_local_ip() -> String:
@@ -340,6 +395,7 @@ func leave_game():
 	_join_verify_token += 1  # cancel any in-flight mod-compat timeout
 	_host_verify_token += 1
 	_host_verify_peer = 0
+	_teardown_upnp()  # join the UPnP probe + remove any port mapping we added
 	if peer:
 		peer.close_connection()
 		peer = null
