@@ -11,6 +11,21 @@ extends "res://src/editor/editor.gd"
 
 var is_processing_remote_input: = false
 
+
+# MP fix — editor->sim->editor "can't click": guarantee board drawing is re-enabled whenever we
+# return to the editor. Toggling in and out of simulation (Tab) could leave the game's `is_focused`
+# stuck false: clicks/draws are silently dropped while the hover cursor still tracks the mouse,
+# because update_cursor() runs BEFORE the `if not is_in_editor or not is_focused: return` guard in
+# _ev_mi_mouse_input_on_board. `is_focused` is only set true again by a popup closing
+# (mn_popup_visibility = false), which is exactly why opening and dismissing the quit dialog "fixes"
+# it by hand. Whenever we are confirmed back in edit mode no popup can be capturing input, so board
+# input must be focused — force it here so no manual popup dance is needed.
+func _on_mi_mode_change_requested(is_simulation_requested: bool) -> void :
+	._on_mi_mode_change_requested(is_simulation_requested)
+	if not is_simulation_requested:
+		is_focused = true
+
+
 func _ev_mi_mouse_input_on_board(_mode: int, _args: Dictionary) -> void :
 	var p_position: Vector2 = _args[E.mi_mouse_input_on_board.p_position]
 	var p_is_pressed: bool = _args[E.mi_mouse_input_on_board.p_is_pressed]

@@ -67,7 +67,6 @@ mods-unpacked/npopescu-VCBMultiplayer/
     ├── simulator.gd       cooperative simulation + best-effort tick alignment
     ├── simulation_controls.gd / simulation_sliders.gd   sim UI mirroring
     ├── button_texture_event.gd / button_toggle_run.gd   paste + run/pause buttons
-    ├── camera.gd          trackpad pan/pinch
     └── label_mouse_position.gd / mouse_over_label.gd    side-panel readouts ignore the remote cursor
 ```
 
