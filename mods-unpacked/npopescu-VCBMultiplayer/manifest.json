@@ -1,7 +1,7 @@
 {
 	"name": "VCBMultiplayer",
 	"namespace": "npopescu",
-	"version_number": "2.9.2",
+	"version_number": "2.9.3",
 	"website_url": "https://github.com/n-popescu/vcb-multiplayer",
 	"description": "Cooperative peer-to-peer multiplayer for Virtual Circuit Board, on the original game engine. Two players connect (ENet, UPnP on UDP 6777) and edit a shared board together in real time - drawing, selection, cursor, camera, undo/redo, bucket fills and in-simulation latch/button presses all stay in sync. Runtime Mod Loader port of the vcb-mp mod.",
 	"dependencies": [],
