@@ -32,6 +32,15 @@ func _ev_mi_mouse_input_on_board(_mode: int, _args: Dictionary) -> void :
 	var p_is_just_pressed: bool = _args[E.mi_mouse_input_on_board.p_is_just_pressed]
 	var p_is_just_released: bool = _args[E.mi_mouse_input_on_board.p_is_just_released]
 	var p_is_left_click: bool = _args[E.mi_mouse_input_on_board.p_is_left_click]
+	# MP fix — editor<->sim Tab lock-up (self-heal): a board-input event only reaches us when the
+	# pointer is in the world-frame context, i.e. NO modal popup/dialog is capturing input (a popup
+	# switches the context to POPUP and cursor_board stops emitting these events). So if is_focused
+	# is somehow still false here it's the stale popup-visibility glitch that the editor<->sim Tab
+	# toggle can leave behind (clicks/draws dropped while hover still tracks), not a real popup —
+	# clear it so drawing works again. Heals on the first mouse move over the board, on any exit
+	# path (Tab or the run/pause button). Skipped while replaying a peer's remote input.
+	if is_in_editor and is_world_frame_context and not is_focused and not is_processing_remote_input:
+		is_focused = true
 	update_cursor(p_position, p_is_pressed, p_is_just_pressed, p_is_just_released, p_is_left_click)
 	if not is_in_editor or not is_focused:
 		return
