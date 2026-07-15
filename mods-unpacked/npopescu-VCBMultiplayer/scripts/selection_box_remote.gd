@@ -27,6 +27,15 @@ func _ready() -> void:
 	if DashedLine.get_material():
 		DashedLine.get_material().set_shader_param("is_move", true)
 
+# Recolour the remote box to the owning player's chosen hover colour (called from mp_draw_sync
+# with that peer's colour). Only the dashed border is tinted; the lifted pixels keep their true
+# colours at the local opacity (see _ready).
+func set_tint(c: Color) -> void:
+	DashedLine.modulate = c
+	if DashedLine.get_material():
+		DashedLine.get_material().set_shader_param("is_move", true)
+
+
 func update_area(p_selection_area: Rect2, p_selection_tiles: Vector2) -> void:
 	if p_selection_area.position == Vector2(-1, -1):
 		hide()

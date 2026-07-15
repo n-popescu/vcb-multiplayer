@@ -39,6 +39,8 @@ var _leave_btn: Button = null
 var _debug_box: VBoxContainer = null
 var _consistency_btn: Button = null
 var _reset_history_btn: Button = null
+var _color_grid: GridContainer = null
+var _color_swatches := []
 
 func _ready() -> void:
 	mp = get_tree().root.get_node_or_null("/root/MP")
@@ -134,6 +136,25 @@ func _build_ui() -> void:
 	_name_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_name_edit.placeholder_text = "Player"
 	name_row.add_child(_name_edit)
+
+	# Colour picker (beneath the name): your hover colour, shown on every other player's screen for
+	# your cursor + selection box. Swatches are the 14 stock trace colours (extra shades appear if a
+	# lobby ever needs more than 14).
+	var color_row := HBoxContainer.new()
+	color_row.add_constant_override("separation", 8)
+	root.add_child(color_row)
+	var color_lbl := Label.new()
+	color_lbl.text = "Color"
+	color_lbl.rect_min_size = Vector2(64, 0)
+	color_lbl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	color_row.add_child(color_lbl)
+	_color_grid = GridContainer.new()
+	_color_grid.columns = 7
+	_color_grid.add_constant_override("hseparation", 4)
+	_color_grid.add_constant_override("vseparation", 4)
+	_color_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	color_row.add_child(_color_grid)
+	_rebuild_color_swatches()
 
 	_status_label = Label.new()
 	_status_label.text = "Offline"
@@ -285,6 +306,7 @@ func _refresh() -> void:
 		if _consistency_btn:
 			_consistency_btn.visible = mp.is_host
 	_rebuild_roster()
+	_rebuild_color_swatches()
 	# Sections were just shown/hidden (offline â session â debug); re-fit so the panel
 	# doesn't keep the taller previous layout's height and leave empty space at the bottom.
 	if visible:
@@ -317,6 +339,68 @@ func _rebuild_roster() -> void:
 		lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(lbl)
 		_roster_list.add_child(row)
+
+func _rebuild_color_swatches() -> void:
+	if _color_grid == null or mp == null:
+		return
+	var want: int = 14
+	if mp.has_method("color_count"):
+		var pc: int = int(mp.connected_players.size())
+		want = int(mp.color_count(max(pc, 1)))
+	if want < 1:
+		want = 1
+	if _color_swatches.size() != want:
+		for child in _color_grid.get_children():
+			child.queue_free()
+		_color_swatches = []
+		for i in range(want):
+			var b := Button.new()
+			b.rect_min_size = Vector2(18, 18)
+			b.focus_mode = Control.FOCUS_NONE
+			b.hint_tooltip = "Hover colour %d" % (i + 1)
+			var _c = b.connect("pressed", self, "_on_color_swatch", [i])
+			_color_grid.add_child(b)
+			_color_swatches.append(b)
+	_update_color_swatches()
+
+
+func _update_color_swatches() -> void:
+	if mp == null:
+		return
+	var selected: int = -1
+	var mci = mp.get("my_color_index")
+	if mci != null:
+		selected = int(mci)
+	for i in range(_color_swatches.size()):
+		var b = _color_swatches[i]
+		if not is_instance_valid(b):
+			continue
+		var col: Color = Color(0.5, 0.5, 0.5)
+		if mp.has_method("color_for_index"):
+			col = mp.color_for_index(i)
+		var sel: bool = (i == selected)
+		for style_name in ["normal", "hover", "pressed", "focus", "disabled"]:
+			b.add_stylebox_override(style_name, _make_swatch_style(col, sel))
+
+
+func _on_color_swatch(index: int) -> void:
+	if mp != null and mp.has_method("set_player_color"):
+		mp.set_player_color(index)
+	_update_color_swatches()
+
+
+func _make_swatch_style(col: Color, selected: bool) -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = col
+	sb.set_corner_radius_all(3)
+	if selected:
+		sb.set_border_width_all(2)
+		sb.border_color = Color(1, 1, 1, 1)
+	else:
+		sb.set_border_width_all(1)
+		sb.border_color = Color(0, 0, 0, 0.55)
+	return sb
+
 
 func _commit_name() -> void:
 	if mp and _name_edit and mp.has_method("set_player_name"):

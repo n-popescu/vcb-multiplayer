@@ -23,6 +23,21 @@ var player_name: String = "Player"
 # _receive_player_name; the roster UI reads it via get_player_name() so it shows names, not ids.
 var player_names: Dictionary = {}
 
+# --- Per-player hover colour ----------------------------------------------------------------
+# Each player picks a hover colour used to render THEIR cursor / selection box / remote presence on
+# everyone else's screen (replacing the old fixed green). Colours come from the 14 stock VCB trace
+# colours (bright "ON" values, minus gray + white); when a lobby needs more than 14 we synthesise
+# extra shades so the first 14 players always get maximally distinct hues. Exchanged on connect and
+# on change, like names, and surfaced to other mods (e.g. the comment block) via get_player_color().
+const TRACE_COLOR_IDS := [
+	"TRACE_RED", "TRACE_ORANGE", "TRACE_YELLOW_WARM", "TRACE_YELLOW_COLD", "TRACE_LEMON",
+	"TRACE_GREEN_WARM", "TRACE_GREEN_COLD", "TRACE_TURQUOISE", "TRACE_BLUE_LIGHT", "TRACE_BLUE",
+	"TRACE_BLUE_DARK", "TRACE_PURPLE", "TRACE_VIOLET", "TRACE_PINK",
+]
+const DEFAULT_REMOTE_COLOR := Color(0.3, 1.0, 0.3)  # legacy green fallback (unknown / no colour yet)
+var my_color_index: int = -1              # -1 = not chosen yet (auto-assigned on connect)
+var player_colors: Dictionary = {}        # peer id → colour index
+
 # Scene to load when game starts
 var game_scene_path: String = "res://src/main/main.tscn"
 
@@ -66,6 +81,12 @@ func _ready():
 		name_file.open("user://mp_name.dat", File.READ)
 		player_name = name_file.get_var()
 		name_file.close()
+	
+	var color_file = File.new()
+	if color_file.file_exists("user://mp_color.dat"):
+		if color_file.open("user://mp_color.dat", File.READ) == OK:
+			my_color_index = int(color_file.get_var())
+			color_file.close()
 	
 	get_tree().connect("network_peer_connected", self, "_on_network_peer_connected")
 	get_tree().connect("network_peer_disconnected", self, "_on_network_peer_disconnected")
@@ -166,6 +187,100 @@ func _get_remote_peer_ids() -> Array:
 	return peer_ids
 
 
+# --- colour palette / accessors -------------------------------------------------------------
+# How many distinct colour slots to offer for a lobby of `player_count`: 14 by default, growing by
+# 14 (extra shades) whenever the lobby exceeds a multiple of 14.
+func color_count(player_count: int) -> int:
+	var base: int = TRACE_COLOR_IDS.size()
+	if player_count <= base:
+		return base
+	return base * int(ceil(float(player_count) / float(base)))
+
+
+# The Color for a colour index. 0..13 are the stock trace hues; higher indices reuse those hues
+# with progressively darker / lighter shades so they stay distinguishable.
+func color_for_index(index: int) -> Color:
+	var base: int = TRACE_COLOR_IDS.size()
+	if base == 0 or int(index) < 0:
+		return DEFAULT_REMOTE_COLOR
+	var i: int = int(index)
+	var col: Color = _trace_on_color(TRACE_COLOR_IDS[i % base])
+	var tier: int = i / base
+	if tier <= 0:
+		return col
+	var step: int = (tier + 1) / 2
+	var amt: float = min(0.18 * float(step), 0.6)
+	if tier % 2 == 1:
+		return col.linear_interpolate(Color(0, 0, 0), amt)
+	return col.linear_interpolate(Color(1, 1, 1), amt)
+
+
+func _trace_on_color(id: String) -> Color:
+	if typeof(C.PALETTE) == TYPE_DICTIONARY and C.PALETTE.has(id):
+		var entry = C.PALETTE[id]
+		if typeof(entry) == TYPE_DICTIONARY and entry.has("ON"):
+			return Color(String(entry["ON"]))
+	return DEFAULT_REMOTE_COLOR
+
+
+# The colour a peer id renders in (its chosen hover colour), or the legacy green if not known yet.
+func get_player_color(pid) -> Color:
+	var key: int = int(pid)
+	if player_colors.has(key):
+		return color_for_index(int(player_colors[key]))
+	return DEFAULT_REMOTE_COLOR
+
+
+func get_player_color_index(pid) -> int:
+	var key: int = int(pid)
+	if player_colors.has(key):
+		return int(player_colors[key])
+	return -1
+
+
+# Set OUR hover colour (from the Multiplayer window swatches), persist it, and tell the other peers.
+func set_player_color(index: int) -> void:
+	my_color_index = int(index)
+	var color_file = File.new()
+	if color_file.open("user://mp_color.dat", File.WRITE) == OK:
+		color_file.store_var(my_color_index)
+		color_file.close()
+	if my_id != 0:
+		player_colors[my_id] = my_color_index
+	_broadcast_player_color()
+	emit_signal("roster_updated")
+
+
+# Pick the lowest colour index no one else is using yet (so auto-assigned colours start distinct).
+# Only assigns when we don't already have a chosen/persisted colour.
+func _ensure_my_color() -> void:
+	if my_color_index >= 0:
+		if my_id != 0:
+			player_colors[my_id] = my_color_index
+		return
+	var used := {}
+	for pid in player_colors.keys():
+		used[int(player_colors[pid])] = true
+	var i: int = 0
+	while used.has(i):
+		i += 1
+	my_color_index = i
+	if my_id != 0:
+		player_colors[my_id] = my_color_index
+
+
+func _broadcast_player_color() -> void:
+	if get_tree().network_peer == null or not is_connected:
+		return
+	for peer_id in _get_remote_peer_ids():
+		rpc_id(int(peer_id), "_receive_player_color", my_id, my_color_index)
+
+
+remote func _receive_player_color(pid: int, index: int) -> void:
+	player_colors[int(pid)] = int(index)
+	emit_signal("roster_updated")
+
+
 # === Host Functions ===
 
 func host_game() -> bool:
@@ -202,6 +317,8 @@ func host_game() -> bool:
 	connected_players.append(1)
 	player_names.clear()
 	player_names[1] = player_name
+	player_colors.clear()
+	_ensure_my_color()
 	
 	# Show the LAN IP immediately, then probe UPnP for a public IP + port forward on a worker
 	# thread (its calls block; see _upnp_setup). When it finishes it updates upnp_external_ip and
@@ -367,8 +484,10 @@ func _on_connected_to_server() -> void:
 	if connected_players.find(my_id) == -1:
 		connected_players.append(my_id)
 	player_names[my_id] = player_name
-	# Tell the host our name (in case we don't also get a network_peer_connected for id 1).
+	_ensure_my_color()
+	# Tell the host our name + colour (in case we don't also get a network_peer_connected for id 1).
 	rpc_id(1, "_receive_player_name", my_id, player_name)
+	rpc_id(1, "_receive_player_color", my_id, my_color_index)
 
 	# Mod-compatibility handshake: send the host our mod fingerprint and start waiting for the
 	# host's reply (if none arrives, the host is incompatible/outdated and we bail).
@@ -407,6 +526,7 @@ func leave_game():
 	is_game_started = false
 	my_id = 0
 	player_names.clear()
+	player_colors.clear()
 	
 	get_tree().network_peer = null
 
@@ -417,9 +537,10 @@ func _on_network_peer_connected(id: int):
 	emit_status("Player: " + str(id) + " joined")
 	if connected_players.find(id) == -1:
 		connected_players.append(id)
-	# Introduce ourselves to the peer that just connected so their roster shows our name
-	# (both ends run this on the mutual connect, so names flow both ways).
+	# Introduce ourselves to the peer that just connected so their roster shows our name + colour
+	# (both ends run this on the mutual connect, so names/colours flow both ways).
 	rpc_id(id, "_receive_player_name", my_id, player_name)
+	rpc_id(id, "_receive_player_color", my_id, my_color_index)
 	emit_signal("player_connected", id)
 	# Host: start the mod-compatibility check for this joiner (kicked if it doesn't verify).
 	if is_host:
@@ -430,6 +551,7 @@ func _on_network_peer_disconnected(id: int):
 	emit_status("Player: " + str(id) + " left")
 	connected_players.erase(id)
 	player_names.erase(id)
+	player_colors.erase(id)
 	emit_signal("player_disconnected", id)
 
 
@@ -632,6 +754,7 @@ func _reject_peer(pid: int, reason: String) -> void:
 		rpc_id(int(pid), "_rpc_incompatible", reason)
 	connected_players.erase(int(pid))
 	player_names.erase(int(pid))
+	player_colors.erase(int(pid))
 	emit_signal("player_disconnected", int(pid))
 	emit_signal("roster_updated")
 	# Give ENet a moment to flush the reason before dropping the peer.

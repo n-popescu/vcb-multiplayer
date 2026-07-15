@@ -1100,6 +1100,7 @@ remote func _rpc_apply_sim_click(payload: Dictionary) -> void:
 	if _remote_cursor_sprite:
 		_remote_cursor_sprite.position = position.floor()
 		_remote_cursor_sprite.visible = true
+		_apply_remote_cursor_color(sender)
 	sim.apply_remote_sim_click(sender, position, is_just_pressed, is_just_released, is_toggle_mode)
 
 
@@ -1223,6 +1224,27 @@ remote func _rpc_apply_cursor_pixels(flat_pixels: Array, size: Vector2):
 	tex.create_from_image(new_img, 0)
 	_remote_cursor_sprite.texture = tex
 	_remote_cursor_sprite.offset = Vector2(-int(size_x / 2), -int(size_y / 2))
+	_apply_remote_cursor_color(get_tree().get_rpc_sender_id())
+
+# The colour a remote peer renders in — its chosen hover colour (from MP), or legacy green.
+func _remote_color(sender_id) -> Color:
+	if mp != null and mp.has_method("get_player_color"):
+		return mp.get_player_color(sender_id)
+	return Color(0.3, 1.0, 0.3)
+
+
+func _apply_remote_cursor_color(sender_id) -> void:
+	if not _remote_cursor_sprite:
+		return
+	var c: Color = _remote_color(sender_id)
+	c.a = 0.7
+	_remote_cursor_sprite.modulate = c
+
+
+func _apply_remote_selection_color(sender_id) -> void:
+	if _remote_selection_box != null and _remote_selection_box.has_method("set_tint"):
+		_remote_selection_box.set_tint(_remote_color(sender_id))
+
 
 func _resolve_remote_cursor_sprite() -> void:
 	var cursor_remote = get_tree().root.find_node("CursorRemote", true, false)
@@ -1315,6 +1337,7 @@ remote func _rpc_apply_cursor_pos(pos: Vector2) -> void:
 		return
 	_remote_cursor_sprite.position = pos.floor()
 	_remote_cursor_sprite.visible = true
+	_apply_remote_cursor_color(get_tree().get_rpc_sender_id())
 
 
 # Remote selection box sync
@@ -1341,6 +1364,7 @@ remote func _rpc_apply_remote_selection_area(area: Rect2, tiles: Vector2, from_m
 		_resolve_remote_selection_nodes()
 	if _remote_selection_box:
 		_remote_selection_box.update_area(area, tiles)
+		_apply_remote_selection_color(get_tree().get_rpc_sender_id())
 	# During a sender mouse gesture select_remote already reproduces this selection (lift / move /
 	# tile / apply) and owns the remote tool's area + tiles — writing them here fought that path and
 	# left the original pixels un-lifted and the moved copy off by the last drag delta. Only adopt
@@ -1364,6 +1388,7 @@ remote func _rpc_apply_remote_selection_image(img_data: PoolByteArray, width: in
 		img.create_from_data(width, height, false, Image.FORMAT_RGBA8, img_data)
 	if _remote_selection_box:
 		_remote_selection_box.update_image(img)
+		_apply_remote_selection_color(get_tree().get_rpc_sender_id())
 	# During a sender mouse gesture select_remote captures / lifts / re-applies the pixels itself and
 	# owns selection_image; writing it here (or flushing) fought that path. Only adopt the sender's
 	# image for NON-mouse selections (paste / blueprint / dropped image / flip / rotate). The
