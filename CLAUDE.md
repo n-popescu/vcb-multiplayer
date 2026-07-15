@@ -38,7 +38,7 @@ Concretely:
 | You change… | Here (`vcb-multiplayer`) | In `vcb-mp` |
 |---|---|---|
 | A **multiplayer script** (`mp_global`, `mp_draw_sync`, `tool_*_remote`, `selection_box_remote`, GUI `btn_mp`/`mp_window`/`status_label`) | update `mods-unpacked/npopescu-VCBMultiplayer/scripts/…` | update the same file under `runtime-mod/…/scripts/…` (byte-identical) **and** the original under `src/…`/`mp/…` (also byte-identical) |
-| A **game script the mod modifies** (`editor`, `history`, `shortcuts`, `tool_bucket`, `tool_selection`, `button_texture_event`, `button_toggle_run`, `simulation_controls`, `simulation_sliders`, `simulator`, `camera`, `label_mouse_position`, `mouse_over_label`) | update the **script extension** under `mods-unpacked/…/extensions/<file>.gd` | update the same extension under `runtime-mod/…/extensions/` **and** make the real edit in `vcb-mp`'s `src/…` |
+| A **game script the mod modifies** (`editor`, `history`, `shortcuts`, `tool_bucket`, `tool_selection`, `button_texture_event`, `button_toggle_run`, `simulation_controls`, `simulation_sliders`, `simulator`, `label_mouse_position`, `mouse_over_label`) | update the **script extension** under `mods-unpacked/…/extensions/<file>.gd` | update the same extension under `runtime-mod/…/extensions/` **and** make the real edit in `vcb-mp`'s `src/…` |
 | A **new scene node** or an **autoload** | update the runtime builder in `mod_main.gd` | mirror in `runtime-mod/…/mod_main.gd` **and** add the node to `src/main/main.tscn` / the autoload to `project.godot` |
 | A **new multiplayer file** | add under `scripts/…` (+ wire into `mod_main.gd`) | mirror under `runtime-mod/…` **and** add under `src/…`/`mp/…` (+ wire into `main.tscn`/`project.godot`) |
 

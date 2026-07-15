@@ -35,7 +35,6 @@ func _init() -> void:
 	ModLoaderMod.install_script_extension(_ext + "simulation_controls.gd")
 	ModLoaderMod.install_script_extension(_ext + "simulation_sliders.gd")
 	ModLoaderMod.install_script_extension(_ext + "simulator.gd")
-	ModLoaderMod.install_script_extension(_ext + "camera.gd")
 	ModLoaderMod.install_script_extension(_ext + "label_mouse_position.gd")
 	ModLoaderMod.install_script_extension(_ext + "mouse_over_label.gd")
 
