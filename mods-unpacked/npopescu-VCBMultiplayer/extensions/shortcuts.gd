@@ -25,7 +25,35 @@ func _get_editor_last_mouse_pos() -> Vector2:
 	return Vector2.ZERO
 
 
+# Runtime Mod Loader double-input guard. Under the Mod Loader the same input event is dispatched to
+# _unhandled_input twice in one frame (a vanilla and a modded path both deliver it — the same
+# double-emit History/MPDrawSync de-dupe downstream). That doubles every keyboard shortcut below:
+# double undo/redo/paste/delete/step, and _tw toggles (sidebars, auto-cross) that flip twice and
+# cancel themselves out. Collapse an exact-duplicate KEY event within a single frame to its first
+# occurrence. Only key events are guarded — mouse/wheel pass through so fast wheel-scroll (ink
+# change) keeps every notch — and distinct keys / later frames are never touched, so no real input
+# is dropped. Fixes the whole class at the source, including any shortcut added here later.
+var _input_dedup_frame: int = -1
+var _input_dedup_seen: Dictionary = {}
+
+
+func _is_duplicate_mod_input(event: InputEvent) -> bool:
+	if not (event is InputEventKey):
+		return false
+	var frame: int = Engine.get_frames_drawn()
+	if frame != _input_dedup_frame:
+		_input_dedup_frame = frame
+		_input_dedup_seen = {}
+	var sig: String = "%d.%d.%d.%d.%d.%d" % [event.scancode, int(event.pressed), int(event.control), int(event.shift), int(event.alt), int(event.meta)]
+	if _input_dedup_seen.has(sig):
+		return true
+	_input_dedup_seen[sig] = true
+	return false
+
+
 func _unhandled_input(event: InputEvent) -> void :
+	if _is_duplicate_mod_input(event):
+		return
 	if false:
 		pass
 	elif BetterInput.is_input_event_action_just_pressed(event, "ui_toggle_left_sidebar"):
