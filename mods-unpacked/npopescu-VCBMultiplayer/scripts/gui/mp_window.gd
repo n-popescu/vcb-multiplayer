@@ -67,6 +67,32 @@ func open_window() -> void:
 	_refresh()
 	popup_centered()
 	set_as_minsize()  # shrink to the content's min size, like the stock dialogs
+	# Containers recompute their minimum size on the NEXT idle frame, so the set_as_minsize()
+	# above runs on the stale (pre-_refresh) size — which left the panel taller than the
+	# visible content (the "empty space beneath everything" bug). Re-fit after the layout
+	# settles so the panel hugs whatever sections are actually shown.
+	_refit()
+
+
+# Shrink the popup to its currently-visible content and re-center, AFTER the containers have
+# recomputed their minimum size (next idle frame). Safe to call whenever the visible content
+# changes; no-ops if the window was hidden meanwhile.
+func _refit() -> void:
+	yield(get_tree(), "idle_frame")
+	if not visible:
+		return
+	set_as_minsize()
+	_center()
+
+
+func _center() -> void:
+	var ws: Vector2 = get_viewport().get_visible_rect().size
+	# Match the flux popup helper's centering (it uses the UI-scaled viewport size) so our
+	# re-fit doesn't shift the box away from where the entrance animation placed it.
+	var u = get_tree().root.get_node_or_null("U")
+	if u != null and u.has_method("get_global_viewport_size_scaled"):
+		ws = u.get_global_viewport_size_scaled()
+	rect_position = ((ws - rect_size) / 2.0).floor()
 
 # ---------------------------------------------------------------- UI construction --
 func _build_ui() -> void:
@@ -259,6 +285,10 @@ func _refresh() -> void:
 		if _consistency_btn:
 			_consistency_btn.visible = mp.is_host
 	_rebuild_roster()
+	# Sections were just shown/hidden (offline â session â debug); re-fit so the panel
+	# doesn't keep the taller previous layout's height and leave empty space at the bottom.
+	if visible:
+		_refit()
 
 func _rebuild_roster() -> void:
 	if not _roster_list:
