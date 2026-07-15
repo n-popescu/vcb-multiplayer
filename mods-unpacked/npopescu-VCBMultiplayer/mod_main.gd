@@ -26,6 +26,7 @@ func _init() -> void:
 	# Script extensions for the game scripts the mod changes (all plain scripts — no scene
 	# roots, no class_name targets other than the well-supported cases). Order doesn't matter.
 	ModLoaderMod.install_script_extension(_ext + "editor.gd")
+	ModLoaderMod.install_script_extension(_ext + "input_blocker.gd")
 	ModLoaderMod.install_script_extension(_ext + "history.gd")
 	ModLoaderMod.install_script_extension(_ext + "shortcuts.gd")
 	ModLoaderMod.install_script_extension(_ext + "tool_bucket.gd")
