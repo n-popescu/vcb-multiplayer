@@ -8,6 +8,18 @@ var _queued_remote_inputs = []
 var _remote_cursor_sprite: Sprite = null
 var _last_synced_cursor_pos: Vector2 = Vector2(-1, -1)
 var _cursor_board: Node2D = null  # for _process cursor sync
+# Latest board-pixel cursor position received from each remote peer (peer id -> Vector2). Read by
+# the MP Players side-panel roster (mp_players_panel.gd) to show each other player's cursor position
+# + the ink under it. The single _remote_cursor_sprite still renders only the last mover (the P2P
+# build supports one other player); this dict is per-peer so the roster is forward-compatible.
+var remote_cursor_positions = {}
+# The roster panel injected into the circuit-editor side panel, and a throttle for (re)building it.
+var _players_panel = null
+var _players_panel_accum = 0.0
+const _PLAYERS_PANEL_SCRIPTS = [
+	"res://mp/gui/mp_players_panel.gd",
+	"res://mods-unpacked/npopescu-VCBMultiplayer/scripts/gui/mp_players_panel.gd",
+]
 var _remote_selection_box: Control = null  # remote selection box renderer
 var _remote_selection_tool: Node = null  # remote selection tool (ToolSelectionRemote)
 var _simulator: Node = null  # the Systems/Simulator node (for tick alignment)
@@ -96,6 +108,8 @@ func _ready():
 
 # Process-based cursor sync
 func _process(_delta):
+	# Keep the roster side-panel present while connected (built lazily; survives re-docking).
+	_maybe_build_players_panel(_delta)
 	# Broadcast cursor position every frame when connected (even before game_started)
 	if mp == null or get_tree().network_peer == null or not mp.is_connected:
 		return
@@ -105,6 +119,51 @@ func _process(_delta):
 		return
 	var mouse_pos = _cursor_board.get_global_mouse_position().floor()
 	_maybe_sync_remote_cursor(mouse_pos)
+
+
+# Inject the "Players" roster into the circuit-editor side panel (top of its root VBox, next to the
+# always-visible "Cursor Info" card, so it persists in edit + sim). Built lazily once we're in a
+# session; re-resolved if it vanishes (e.g. the panel was re-docked). Throttled so the recursive
+# find_node runs at most ~once a second.
+func _maybe_build_players_panel(delta) -> void:
+	if mp == null or not mp.is_connected:
+		return
+	if _players_panel != null and is_instance_valid(_players_panel):
+		return
+	_players_panel = null
+	_players_panel_accum += delta
+	if _players_panel_accum < 1.0:
+		return
+	_players_panel_accum = 0.0
+	var hovered = get_tree().root.find_node("HoveredInk", true, false)
+	if hovered == null:
+		return
+	var vbox = hovered.get_parent()
+	if vbox == null:
+		return
+	var existing = vbox.get_node_or_null("MPPlayersPanel")
+	if existing != null:
+		_players_panel = existing
+		return
+	var scr = _load_players_panel_script()
+	if scr == null:
+		return
+	var panel = scr.new()
+	if panel == null:
+		return
+	panel.name = "MPPlayersPanel"
+	vbox.add_child(panel)
+	vbox.move_child(panel, 0)  # sit at the very top of the side panel
+	_players_panel = panel
+
+
+func _load_players_panel_script():
+	for path in _PLAYERS_PANEL_SCRIPTS:
+		if ResourceLoader.exists(path):
+			var scr = load(path)
+			if scr != null:
+				return scr
+	return null
 
 
 # ==== Board-state consistency check (manual, host-initiated from the DEBUG section) =========
@@ -1177,6 +1236,7 @@ func _on_player_connected(id: int):
 
 func _on_player_disconnected(id: int):
 	_log("Player " + str(id) + " disconnected")
+	remote_cursor_positions.erase(id)
 	_set_remote_cursor_visibility(false)
 	_last_synced_cursor_pos = Vector2(-1, -1)
 	# reset the consistency-check + tick-alignment state for the next session
@@ -1327,6 +1387,9 @@ func _maybe_sync_remote_cursor(pos: Vector2) -> void:
 
 
 remote func _rpc_apply_cursor_pos(pos: Vector2) -> void:
+	# Record this peer's position for the roster panel (kept even when out of bounds, where the
+	# panel just shows it as-is; it decides whether an ink sits under it).
+	remote_cursor_positions[get_tree().get_rpc_sender_id()] = pos
 	if not _remote_cursor_sprite:
 		_resolve_remote_cursor_sprite()
 	if not _remote_cursor_sprite:
