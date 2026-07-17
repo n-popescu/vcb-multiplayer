@@ -883,10 +883,21 @@ remote func _rpc_apply_remote_copy(img_data: PoolByteArray, img_w: int, img_h: i
 	_remote_selection_tool.delete_selection()
 
 
+# Per-frame de-dupe of the LOCAL paste broadcast, mirroring the undo/redo routing guard above. The
+# paste shortcut is delivered twice in one frame under the runtime Mod Loader, so ed_selection_paste
+# is echoed twice; without this the paste op-event was broadcast to the peer twice. RPC-applied
+# pastes arrive through _apply_remote_event (gated by _is_applying_remote_input) and are never
+# reached here, so they are unaffected. A genuine second paste is always more than one frame apart.
+var _last_paste_broadcast_frame: int = -1
+
+
 func _ev_ed_selection_paste(_mode: int, _args: Dictionary):
 	if _is_applying_remote_input or not _has_network_peer():
-		print("[MPDrawSync] _ev_ed_selection_paste: skipped (applying=", _is_applying_remote_input, " peer=", _has_network_peer(), ")")
 		return
+	var frame: int = Engine.get_frames_drawn()
+	if frame == _last_paste_broadcast_frame:
+		return
+	_last_paste_broadcast_frame = frame
 	if not _ensure_editor():
 		return
 	# Only the active layer is needed: paste position + logic image ride the area/image change
