@@ -2,9 +2,20 @@ extends "res://src/editor/tool_selection.gd"
 
 # vcb-mp runtime port — script extension of the game's ToolSelection.
 #
-# A pasted selection must land where the user pasted (so it mirrors to the remote peer at
-# the right spot), not centered on the local camera. We (1) capture the board cursor position
-# the paste event carries, and (2) always position the pasted selection at that cursor.
+# Paste position fix: a paste triggered with the mouse on the board lands at the cursor
+# (so it mirrors to the remote peer at the right spot). When the mouse is off-board (e.g.
+# the user presses Ctrl+V while hovering over the VMem panel or assembly editor), we fall
+# back to vanilla's camera-centred position instead of always using mouse_pos_on_board.
+#
+# Bug fixed (was: always mouse_pos_on_board):
+#   When mouse was off-board, mouse_pos_on_board was stale (often Vector2.ZERO), placing
+#   the paste at (-size/2, -size/2) — off the board, invisible. On the next paste call
+#   selection_image != null triggered apply_selection(true), stamping the invisible selection
+#   to the board corner (visible traces) before creating the new floating selection at the
+#   correct position. The user saw: traces at corner + movable preview = apparent double-paste.
+#
+# The area/image RPCs carry the actual paste position to the remote regardless of which
+# fallback is used, so network sync is unaffected.
 
 func _ev_ed_selection_paste(_mode: int, _args: Dictionary) -> void :
 	if ED.editor_tool == ED.TOOL.SELECTION:
@@ -18,7 +29,12 @@ func paste_selection() -> void :
 		if not selection_image == null:
 			apply_selection(true)
 		var size: = copy_selection_area.size
-		var pos: = Vector2(mouse_pos_on_board.x - (size.x / 2), mouse_pos_on_board.y - (size.y / 2))
+		# Use cursor position when the mouse is on the board; camera-centre otherwise (vanilla).
+		# This prevents stale/zero mouse_pos_on_board from placing the paste off-board, which
+		# caused apply_selection(true) to stamp invisible traces on the next paste call.
+		var pos: = get_pos_centered_at_camera(size)
+		if ED.is_world_frame_context:
+			pos = Vector2(mouse_pos_on_board.x - (size.x / 2), mouse_pos_on_board.y - (size.y / 2))
 		selection_area = Rect2(pos, size)
 		selection_area.position = selection_area.position.round()
 		selection_image = copy_selection_image.duplicate()
