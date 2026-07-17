@@ -2,17 +2,36 @@ extends "res://src/editor/tool_selection.gd"
 
 # vcb-mp runtime port — script extension of the game's ToolSelection.
 #
-# Only select() is overridden (see below). Paste is intentionally NOT overridden here — it is left
-# byte-identical to vanilla. Vanilla paste_selection() already positions a floating paste at the
-# live cursor when the mouse is over the board (mouse_pos_on_board, which the inherited
-# _ev_mi_mouse_input_on_board keeps up to date from board mouse events, incl. hover) and at the
-# camera centre otherwise; the paste position is mirrored to the remote peer through the
-# ed_selection_area_change RPC. An earlier port added a paste_selection()/_ev_ed_selection_paste
-# override that took the position from Editor.last_mouse_pos, which only updates on board CLICKS
-# (not hover). On Ctrl+V that value was stale/zero, so the paste landed off-board and a following
-# paste apply_selection()-stamped the stray selection onto the board while floating a new one — the
-# "Ctrl+V pastes on the board AND floats a box" bug. Removing the override restores the correct
-# vanilla behaviour on both peers.
+# select() is overridden (see further below). _ev_ed_selection_paste is overridden ONLY to add a
+# per-frame de-dupe; the paste POSITION handling is left byte-identical to vanilla. Vanilla
+# paste_selection() already positions a floating paste at the live cursor when the mouse is over
+# the board (mouse_pos_on_board, which the inherited _ev_mi_mouse_input_on_board keeps up to date
+# from board mouse events, incl. hover) and at the camera centre otherwise; the paste position is
+# mirrored to the remote peer through the ed_selection_area_change RPC. An earlier port took the
+# position from Editor.last_mouse_pos (which only updates on board CLICKS, not hover); on Ctrl+V
+# that was stale/zero so the paste landed off-board — do NOT reintroduce that.
+#
+# Ctrl+V double-paste fix (de-dupe at the CONSUMER): under the runtime Mod Loader the paste
+# shortcut is delivered twice in one frame, so ed_selection_paste is echoed twice. The producer
+# guard in the Shortcuts extension keys on per-instance state and does NOT collapse the duplicate
+# that reaches this node, so vanilla paste_selection() ran twice: the 1st call floated the pasted
+# selection, and the 2nd — now seeing a non-null selection_image — ran apply_selection() and
+# STAMPED that floating paste onto the board before floating a fresh copy. The user saw the pasted
+# traces committed to the board directly behind the still-floating selection (vanilla only floats
+# it, to be placed with a click). Undo/redo/step already de-dupe at their single-instance consumer
+# (History / MPDrawSync); paste had no such guard. Collapse duplicate paste requests within one
+# frame to a single paste_selection(). A genuine second Ctrl+V is always more than one frame apart,
+# and a held Ctrl+V never repeats (the shortcut uses allow_echo=false), so no real paste is dropped.
+var _last_paste_frame: int = -1
+
+
+func _ev_ed_selection_paste(_mode: int, _args: Dictionary) -> void :
+	var frame: int = Engine.get_frames_drawn()
+	if frame == _last_paste_frame:
+		return
+	_last_paste_frame = frame
+	if ED.editor_tool == ED.TOOL.SELECTION:
+		paste_selection()
 
 # vcb-mp fix: set is_selecting BEFORE the new-marquee area emit. The mod's from_mouse gate
 # (MPDrawSync._is_selection_mouse_active) keys on is_selecting/is_dragging/is_tiling to know a
