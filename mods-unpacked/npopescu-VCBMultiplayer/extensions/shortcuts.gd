@@ -2,27 +2,23 @@ extends "res://src/editor/shortcuts.gd"
 
 # vcb-mp runtime port — script extension of the game's Shortcuts.
 #
-# Two keyboard shortcuts need to be MP-aware, and both live inside _unhandled_input, so we
-# override the whole handler (GDScript can't patch mid-function) and reproduce it verbatim
-# with exactly the two mod edits the whole-pck build made:
-#   • "mi_switch_modes" routes the run/pause toggle through MP.request_mode_change so the
-#     two peers switch together;
-#   • "paste" carries the board cursor position so a remote paste lands where you pasted.
+# One keyboard shortcut needs to be MP-aware, and it lives inside _unhandled_input, so we override
+# the whole handler (GDScript can't patch mid-function) and reproduce it verbatim with exactly the
+# one mod edit the whole-pck build makes:
+#   • "mi_switch_modes" routes the run/pause toggle through MP.request_mode_change so the two peers
+#     switch together.
+#
+# NOTE: "paste" is deliberately left byte-identical to vanilla (E.echo(E.ed_selection_paste, {})).
+# An earlier build injected Editor.last_mouse_pos into the paste event; that overwrote
+# ToolSelection's live-tracked mouse_pos_on_board with a value that only updates on board CLICKS
+# (not hover), so Ctrl+V pasted off-board and the next paste stamped the stray selection onto the
+# board (the "Ctrl+V pastes on the board AND floats a box" bug). Vanilla already tracks the cursor
+# for the local paste position, and the remote paste position rides the selection-area RPC, so no
+# injection is needed.
 #
 # The Ctrl+Z / Ctrl+Y double-fire de-dupe lives at the consumption layer (History and
 # MPDrawSync), not here, so both this override and the vanilla input paths collapse to one
 # undo/redo per frame regardless of how many times the request is emitted.
-
-
-func _get_editor() -> Node:
-	return get_tree().root.find_node("Editor", true, false)
-
-
-func _get_editor_last_mouse_pos() -> Vector2:
-	var editor = _get_editor()
-	if editor and editor.has_method("get"):
-		return editor.get("last_mouse_pos")
-	return Vector2.ZERO
 
 
 # Runtime Mod Loader double-input guard. Under the Mod Loader the same input event is dispatched to
@@ -163,6 +159,4 @@ func _unhandled_input(event: InputEvent) -> void :
 		elif BetterInput.is_input_event_action_just_pressed(event, "copy"):
 			E.echo(E.ed_selection_copy, {})
 		elif BetterInput.is_input_event_action_just_pressed(event, "paste"):
-			E.echo(E.ed_selection_paste, {
-				E.mi_mouse_input_on_board.p_position: _get_editor_last_mouse_pos(),
-			})
+			E.echo(E.ed_selection_paste, {})
