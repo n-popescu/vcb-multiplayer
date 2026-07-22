@@ -327,14 +327,6 @@ func host_game() -> bool:
 	emit_status("HOST OK! LAN IP: " + upnp_external_ip)
 	_start_upnp_setup()
 
-
-	# MP: start every session on a fresh board (before we join our own relay, so no stray
-	# events fire) — both players begin from the same blank file, not whatever the host had
-	# open.
-	var fs := _find_file_system()
-	if fs and fs.has_method("new_file"):
-		fs.new_file()
-	
 	return true
 
 func _find_file_system() -> Node:
