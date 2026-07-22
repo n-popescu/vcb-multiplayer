@@ -486,10 +486,6 @@ func _on_connected_to_server() -> void:
 	rpc_id(1, "_rpc_submit_mod_fingerprint", my_id, _local_mod_fingerprint())
 	_begin_join_verify()
 
-	var fs := _find_file_system()
-	if fs and fs.has_method("new_file"):
-		fs.new_file()
-
 	emit_status("Connected! Waiting for host to start...")
 
 
@@ -521,6 +517,7 @@ func leave_game():
 	player_colors.clear()
 	
 	get_tree().network_peer = null
+	
 
 
 # === Network Signals ===
