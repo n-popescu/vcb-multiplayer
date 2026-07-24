@@ -41,6 +41,7 @@ var _consistency_btn: Button = null
 var _reset_history_btn: Button = null
 var _color_grid: GridContainer = null
 var _color_swatches := []
+var _sync_label: Label = null  # "Board will sync with host" message for joiners
 
 func _ready() -> void:
 	mp = get_tree().root.get_node_or_null("/root/MP")
@@ -55,6 +56,9 @@ func _ready() -> void:
 		# Names arrive shortly after connect (and on rename); refresh the roster when they do.
 		if mp.has_signal("roster_updated"):
 			var _s7 = mp.connect("roster_updated", self, "_on_player_changed")
+		# Board sync: hide the "syncing" label once the host's board arrives.
+		if mp.has_signal("board_synced"):
+			var _s8 = mp.connect("board_synced", self, "_on_board_synced")
 	# Commit the name when the field is confirmed (Enter) or loses focus, so a rename made
 	# mid-session propagates to the other player too (set_player_name broadcasts when connected).
 	if _name_edit:
@@ -199,6 +203,15 @@ func _build_ui() -> void:
 	_session_box.add_constant_override("separation", 6)
 	root.add_child(_session_box)
 
+	# Sync message for joiners: "Board will sync with host after joining..."
+	_sync_label = Label.new()
+	_sync_label.text = "Board will sync with host..."
+	_sync_label.align = Label.ALIGN_CENTER
+	_sync_label.autowrap = true
+	_sync_label.add_color_override("font_color", Color(0.4, 0.7, 1.0))
+	_sync_label.visible = false
+	_session_box.add_child(_sync_label)
+
 	var code_row := HBoxContainer.new()
 	code_row.add_constant_override("separation", 8)
 	_session_box.add_child(code_row)
@@ -305,9 +318,13 @@ func _refresh() -> void:
 		_debug_box.visible = connected
 		if _consistency_btn:
 			_consistency_btn.visible = mp.is_host
+	# Show "Board will sync with host..." for joiners until the board_synced signal fires.
+	if _sync_label and mp:
+		var is_joiner: bool = connected and not mp.is_host and not mp.is_game_started
+		_sync_label.visible = is_joiner
 	_rebuild_roster()
 	_rebuild_color_swatches()
-	# Sections were just shown/hidden (offline â session â debug); re-fit so the panel
+	# Sections were just shown/hidden (offline ↔ session ↔ debug); re-fit so the panel
 	# doesn't keep the taller previous layout's height and leave empty space at the bottom.
 	if visible:
 		_refit()
@@ -486,6 +503,12 @@ func _on_server_disconnected() -> void:
 func _on_game_started() -> void:
 	_set_status("Session started")
 	hide()
+
+func _on_board_synced() -> void:
+	# Board sync complete — hide the "syncing" label.
+	if _sync_label:
+		_sync_label.visible = false
+	_refresh()
 
 func _set_status(text: String) -> void:
 	if _status_label:

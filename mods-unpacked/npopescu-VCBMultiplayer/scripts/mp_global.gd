@@ -50,6 +50,9 @@ signal game_started
 # Emitted when the peer→name map changes (a name arrived / was updated), so the roster UI
 # can refresh to show the new name without a connect/disconnect event.
 signal roster_updated
+# Emitted when the host sends the full board to a joining peer (host-side after sending,
+# joiner-side after receiving and applying). The MP window uses this to hide the sync message.
+signal board_synced
 
 var upnp_external_ip: String = ""
 var upnp: UPNP
@@ -574,6 +577,125 @@ remote func on_game_started():
 	emit_signal("game_started")
 
 
+# === Board sync (host → joiner on connect + on file load) ==============================
+# When a joiner connects, the host sends the full board (all 4 layers, compressed) so the
+# joiner's board matches the host's. When the host loads a new file, it broadcasts the new
+# layers to all connected peers. Both use ZSTD-compressed layer data to keep payloads small.
+
+func send_full_board_to_peers() -> void:
+	# Host only: serialize all 4 layer images (compressed) + project settings and send to peers.
+	if not is_host or not is_connected:
+		return
+	var editor = _find_editor()
+	if editor == null:
+		return
+	var layers_data := []
+	for img in editor.images:
+		if img == null:
+			layers_data.append([PoolByteArray(), 0, 0])
+			continue
+		img.lock()
+		var raw = img.get_data()
+		img.unlock()
+		var comp = raw.compress(File.COMPRESSION_ZSTD)
+		layers_data.append([comp, int(img.get_width()), int(img.get_height())])
+	var settings := _collect_project_settings()
+	var peer_ids = _get_remote_peer_ids()
+	for peer_id in peer_ids:
+		rpc_id(peer_id, "_rpc_receive_full_board", layers_data, settings)
+	emit_status("Board synced to " + str(peer_ids.size()) + " client(s)")
+	emit_signal("board_synced")
+
+
+remote func _rpc_receive_full_board(layers_data: Array, settings: Dictionary) -> void:
+	# Joiner only: receive the host's full board and apply it.
+	_apply_layers_data(layers_data)
+	_apply_project_settings(settings)
+	# Reset undo/redo history for the joiner after receiving the board (not the host)
+	var history = _find_history()
+	if history and history.has_method("public_clear_history"):
+		history.public_clear_history()
+	emit_status("Board synced from host!")
+	emit_signal("board_synced")
+
+
+func _apply_layers_data(layers_data: Array) -> void:
+	# Decompress and apply layer images to the editor.
+	var editor = _find_editor()
+	if editor == null:
+		return
+	for i in range(min(layers_data.size(), editor.images.size())):
+		var entry = layers_data[i]
+		if entry == null or typeof(entry) != TYPE_ARRAY or entry.size() < 3:
+			continue
+		var comp = entry[0] as PoolByteArray
+		var w = int(entry[1])
+		var h = int(entry[2])
+		if w <= 0 or h <= 0 or comp.size() == 0:
+			continue
+		var raw = comp.decompress(w * h * 4, File.COMPRESSION_ZSTD)
+		if raw.size() == 0:
+			continue
+		var img = Image.new()
+		img.create_from_data(w, h, false, Image.FORMAT_RGBA8, raw)
+		editor.images[i] = img
+	# Notify the editor that layers changed (refreshes the renderer)
+	E.echo(E.fs_file_modify, {})
+	E.echo(E.ed_layers_resources_change, {
+		E.ed_layers_resources_change.p_layers: editor.images, })
+
+
+func _collect_project_settings() -> Dictionary:
+	# Gather the project settings that affect simulation determinism and display.
+	var fs = _find_file_system()
+	var settings := {}
+	if fs:
+		settings["clock_interval"] = fs.project.get("clock_interval", 1)
+		settings["timer_interval"] = fs.project.get("timer_interval", 500)
+		settings["random_seed"] = fs.project.get("random_seed", 1)
+		settings["random_is_time_seed"] = fs.project.get("random_is_time_seed", false)
+		settings["led_palette"] = fs.project.get("led_palette", [])
+	return settings
+
+
+func _apply_project_settings(settings: Dictionary) -> void:
+	# Apply received project settings to the local file system + editor.
+	if settings.empty():
+		return
+	var fs = _find_file_system()
+	if fs == null:
+		return
+	if settings.has("clock_interval"):
+		fs.project["clock_interval"] = settings["clock_interval"]
+		E.echo(E.ed_clock_interval_change, {E.ed_clock_interval_change.p_interval: settings["clock_interval"]})
+	if settings.has("timer_interval"):
+		fs.project["timer_interval"] = settings["timer_interval"]
+		E.echo(E.ed_timer_interval_change, {E.ed_timer_interval_change.p_interval: settings["timer_interval"]})
+	if settings.has("random_seed"):
+		fs.project["random_seed"] = settings["random_seed"]
+		E.echo(E.ed_random_seed_change, {E.ed_random_seed_change.p_seed: settings["random_seed"]})
+	if settings.has("random_is_time_seed"):
+		fs.project["random_is_time_seed"] = settings["random_is_time_seed"]
+		E.echo(E.ed_random_is_time_seed_change, {E.ed_random_is_time_seed_change.p_is_time_seed: settings["random_is_time_seed"]})
+	if settings.has("led_palette"):
+		fs.project["led_palette"] = settings["led_palette"]
+		E.echo(E.ed_led_palette_change, {E.ed_led_palette_change.p_led_palette: settings["led_palette"]})
+
+
+func _find_editor():
+	var main = get_tree().root.get_node_or_null("Main")
+	if main:
+		return main.find_node("Editor", true, false)
+	return null
+
+
+func _find_history():
+	var editor = _find_editor()
+	if editor:
+		return editor.get_node_or_null("History")
+	return null
+
+
 remote func on_mode_change_requested(is_simulation_requested: bool):
 	_is_applying_remote_mode_change = true
 	E.emit_signal("mi_mode_change_requested", is_simulation_requested)
@@ -717,6 +839,9 @@ remote func _rpc_submit_mod_fingerprint(pid: int, join_fp) -> void:
 			_host_verify_peer = 0
 			_host_verify_token += 1  # cancel the kick timer
 		rpc_id(int(pid), "_rpc_host_fingerprint", host_fp)
+		# Mod-compat passed: send the full board to the newly verified joiner so their
+		# board matches the host's (instead of starting blank).
+		send_full_board_to_peers()
 	else:
 		_reject_peer(int(pid), _describe_mod_mismatch(host_fp, join_fp))
 

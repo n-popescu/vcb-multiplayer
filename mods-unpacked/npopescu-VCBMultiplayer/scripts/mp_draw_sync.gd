@@ -23,6 +23,9 @@ const _PLAYERS_PANEL_SCRIPTS = [
 var _remote_selection_box: Control = null  # remote selection box renderer
 var _remote_selection_tool: Node = null  # remote selection tool (ToolSelectionRemote)
 var _simulator: Node = null  # the Systems/Simulator node (for tick alignment)
+# File-controls buttons (BtnNew, BtnOpen) — hidden while connected, shown when disconnected.
+var _btn_new: TextureButton = null
+var _btn_open: TextureButton = null
 # MP tick-alignment (best-effort "pause/step on the same tick"). When the simulation PAUSES, the
 # host is the tick authority: it broadcasts its paused tick once, and each client fast-forwards its
 # own engine to match (forward-only — a free-running engine keeps no snapshots to rewind, and the
@@ -100,8 +103,11 @@ func _ready():
 		E.ed_led_palette_change,
 		E.vd_vinput_value_change,
 	])
+	# File-load sync: when the host loads/creates a file, broadcast the layers to peers.
+	E.follow_events(self, [E.fs_project_change])
 	_resolve_remote_cursor_sprite()
 	_resolve_remote_selection_nodes()
+	_find_file_control_buttons()
 	_flush_queued_remote_inputs()
 	_log("Initialized")
 
@@ -1240,9 +1246,48 @@ func _flush_queued_remote_inputs():
 		_apply_remote_mouse_input(payload)
 
 
+# === File-control button hiding (BtnNew / BtnOpen) ================================
+# While connected to a multiplayer session, the "new file" and "open file" toolbar buttons
+# are hidden so the joiner can't accidentally start a different board. They reappear when
+# the session ends or the peer disconnects.
+
+func _find_file_control_buttons() -> void:
+	var main = get_tree().root.get_node_or_null("Main")
+	if main == null:
+		return
+	_btn_new = main.find_node("BtnNew", true, false)
+	_btn_open = main.find_node("BtnOpen", true, false)
+
+
+func _update_file_buttons_visibility() -> void:
+	var connected: bool = mp != null and (mp.is_connected or mp.is_host)
+	if _btn_new:
+		_btn_new.visible = not connected
+	if _btn_open:
+		_btn_open.visible = not connected
+
+
+# === File load broadcast (host → joiner) =========================================
+# When the host loads/creates a file, fs_project_change fires after the local editor
+# applies the new layers. We piggyback on that event to send the updated board to every
+# connected peer — the same send_full_board_to_peers() the debug-tab "Sync board" button uses.
+
+func _ev_fs_project_change(_mode: int, _args: Dictionary) -> void:
+	if mp == null or not mp.is_host or not _has_network_peer():
+		return
+	call_deferred("_deferred_broadcast_board")
+
+
+func _deferred_broadcast_board() -> void:
+	if mp == null or not mp.is_host or not _has_network_peer():
+		return
+	mp.send_full_board_to_peers()
+
+
 func _on_player_connected(id: int):
 	_log("Player " + str(id) + " connected")
 	_flush_queued_remote_inputs()
+	_update_file_buttons_visibility()
 
 
 func _on_player_disconnected(id: int):
@@ -1254,6 +1299,7 @@ func _on_player_disconnected(id: int):
 	_reset_digest()
 	_sim_is_paused = false
 	_last_align_tick = -1
+	_update_file_buttons_visibility()
 
 
 # === Remote cursor relay ===
