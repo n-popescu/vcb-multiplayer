@@ -27,6 +27,10 @@ build** of the mod. It is **pure GDScript + assets** — it loads at runtime fro
 
 - One player hosts; hosting opens UDP port `6777` (via UPnP when the router supports it,
   otherwise forward it once or use a LAN IP). The other joins by IP.
+- **The session starts on the host's board.** When the host presses **Start**, its whole board is
+  handed to the joiner (whatever the joiner had open is replaced) and the shared undo history is
+  reset, so both players genuinely begin from the same pixels. Opening a different project during a
+  session hands the new board over as well.
 - Both then edit the shared board — drawing, selection, cursor and camera are mirrored, and
   while simulating, latch/button presses are synced so both boards stay identical.
 - Undo/redo is host-authoritative and shared. The Multiplayer window's **DEBUG** section has a

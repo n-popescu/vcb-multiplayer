@@ -122,7 +122,49 @@ selection (a 1px-tall trace, size 1×N), so it applied locally and vanished on t
 Keep the selection RPC path free of per-frame `print()`: `ed_selection_area_change` fires on every
 motion frame of a drag, and a synchronous stdout write per frame is pure cost.
 
-## 6. Remote cursor visibility vs camera zoom
+## 6. The shared board: what makes "two people on one board" actually hold
+
+Everything else in this mod assumes **both peers hold byte-identical layers**: strokes are mirrored as
+pixel ops onto a board that is expected to match, undo/redo is a shared stack of whole-layer
+snapshots, and the native engine is only deterministic for identical layers. Three rules keep that
+true — don't break them:
+
+1. **A session starts with a board handoff.** `MPDrawSync._on_game_started` → `host_push_full_board()`
+   → `_push_full_board()` ships every tile of all 4 layers to the clients (the same
+   `_serialize_tile` / `_rpc_apply_tiles` path as the manual consistency check, batched by tile count
+   AND compressed bytes), then resets the shared undo history on every peer so nobody can undo into a
+   board it never had. Any floating selection is dropped first on both sides — those pixels were
+   lifted off the PRE-session board. Before this, each peer just kept whatever it had open, so the two
+   were editing different boards from the first second. **Every tile is sent, including empty ones**:
+   an empty tile here may be a filled tile there and has to be cleared.
+2. **Replacing the board locally re-pushes it** (`_ev_fs_project_change`): New / Open / a sample
+   project mid-session would otherwise silently desync the session. Only the LAYERS travel — the
+   file's assembly, vmem and notes do not, so opening a project mid-session is still best done from
+   one side and announced.
+3. **Mirror exactly the frames the local editor acted on** (`_should_mirror_stroke_frame`). MPDrawSync
+   sees the same board echo the Editor does, but the Editor drops some of them, and every dropped
+   frame we still sent became a stroke on the peer that the sender never made: input while a popup is
+   focused, drag frames of a press that started off the board, and — subtly — a SHIFT/CTRL-constrained
+   frame that resolves to the pixel the tool last used, where vanilla `draw()`/`select()` returns
+   without painting. That last one is not harmless: **with Auto-cross on, re-painting a pixel turns the
+   trace just drawn into CROSS pixels**, so the peer's board ends up different. A release is only
+   mirrored if we mirrored its press. `Editor._input`'s direct `select(…, is_just_released, …)` call
+   (a mouse-button event outside the world frame, which `cursor_board` never echoes) is mirrored
+   explicitly through `MPDrawSync.mirror_selection_release`, or the peer's `ToolSelectionRemote` stays
+   stuck mid-drag.
+
+Also: **per-player editor state must ride the payload, never be read off the local editor.** The brush,
+bucket toggles, layer, ink, paint colour and ALT already do. So does the ink **filter** (`p_filter`) —
+`ToolArrayPencilEraserRemote.paint_brush_pixels` used to read the local `ED.filter`, so if either
+player had a filter set, the other's stroke was filtered by the wrong list and the boards drifted.
+A remote stroke also echoes `fs_file_modify`, like a local one: the peer's work must mark OUR file
+dirty or the autosave and the unsaved-changes prompt ignore it.
+
+**Known remaining gap:** two players painting the SAME pixel at the same instant converge to whichever
+op each machine applied last — there is no total order on pixel ops. That needs the host-relay rework;
+until then the Multiplayer window's DEBUG "Recheck board sync" heals it on demand.
+
+## 7. Remote cursor visibility vs camera zoom
 
 `MPDrawSync` renders a peer's cursor as a Sprite in **board space** (`World/CursorRemote/Sprite`,
 textured from their brush pixels), so it shrinks with the board: zoomed out, a 1px brush is a
@@ -139,7 +181,7 @@ whenever the sprite's **texture** changes (the peer's brush size is part of the 
 camera transforms. The event's `p_zoom` is UI-scale-normalized (`camera.gd::emit_transform`), which is
 what the renderer's threshold is expressed in too — compare like with like.
 
-## 7. Git / PR workflow for agents
+## 8. Git / PR workflow for agents
 
 - Branch from `origin/main` (`git fetch origin main` first).
 - **Branch names MUST start with `claude/` and END WITH the current session id**, or `git push`

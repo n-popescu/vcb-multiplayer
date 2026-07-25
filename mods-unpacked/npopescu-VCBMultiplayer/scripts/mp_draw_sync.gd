@@ -5,6 +5,11 @@ var mp = null
 var log_label = null
 var _is_applying_remote_input = false
 var _queued_remote_inputs = []
+# Is a LOCAL stroke (press..release) currently being mirrored, and the last board pixel we mirrored
+# for it? See _should_mirror_stroke_frame: we must send the peer exactly the frames the local editor
+# acted on, no more.
+var _local_stroke_active = false
+var _local_stroke_pos = Vector2(-1, -1)
 var _remote_cursor_sprite: Sprite = null
 var _last_synced_cursor_pos: Vector2 = Vector2(-1, -1)
 var _cursor_board: Node2D = null  # for _process cursor sync
@@ -55,6 +60,8 @@ var _local_sim_tick: int = 0    # our engine's last-seen tick (from sm_telemtry_
 # the host (the authority). The whole board is never sent.
 const _DIGEST_TILE: = 256               # tile edge in pixels (2048/256 = 8 tiles per axis)
 const _DIGEST_MAX_TILES_PER_REQ: = 64   # cap tiles pulled per check (bounds a pathological diff)
+const _PUSH_TILES_PER_RPC: = 8          # tiles per RPC in the board handoff below…
+const _PUSH_BYTES_PER_RPC: = 262144     # …and a byte budget, so a dense board can't build a huge RPC
 var _tiles_x: = 0
 var _tiles_y: = 0
 var _tiles_per_layer: = 0
@@ -69,6 +76,8 @@ func _ready():
 	if mp:
 		mp.connect("player_connected", self, "_on_player_connected")
 		mp.connect("player_disconnected", self, "_on_player_disconnected")
+		if mp.has_signal("game_started"):
+			mp.connect("game_started", self, "_on_game_started")
 	E.follow_events(self, [E.mi_mouse_input_on_board])
 	# Also sync cursor brush pixels, tool changes, and camera transform
 	E.follow_events(self, [E.ed_cursor_board_pixels_change])
@@ -91,6 +100,9 @@ func _ready():
 		E.ed_undo_request,
 		E.ed_redo_request,
 	])
+	# A whole new board replacing ours (New / Open / sample project) must not silently desync the
+	# session — see _ev_fs_project_change.
+	E.follow_events(self, [E.fs_project_change])
 	# Sync simulation events
 	# Note: mi_mode_change_requested is already synced by mp_global.gd via RPC
 	E.follow_events(self, [
@@ -295,9 +307,15 @@ remote func _rpc_request_tiles(indices: PoolIntArray) -> void:
 		_log("Sent " + str(payloads.size()) + " authoritative tile(s) to peer " + str(sender))
 
 
-remote func _rpc_apply_tiles(payloads: Array) -> void:
+remote func _rpc_apply_tiles(payloads: Array, sender_tile_total: int = -1) -> void:
 	# Client side: blit the host's authoritative tiles into place.
 	if not _ensure_editor() or not _ensure_digest_init():
+		return
+	# A tile index encodes [layer, tx, ty] in the SENDER's tile layout, so applying tiles computed
+	# for a different circuit size would scatter them. Refuse instead (e.g. the two peers opened
+	# boards of different sizes with the Board Size mod).
+	if sender_tile_total != -1 and sender_tile_total != _tile_total:
+		_log("Ignored a board update: the other player's board layout differs from ours")
 		return
 	var applied = 0
 	for p in payloads:
@@ -379,6 +397,80 @@ func _apply_tile(p) -> bool:
 	return true
 
 
+# === Session start: hand the host's board to the joiners ====================================
+# Until this existed, a session started with each peer keeping WHATEVER BOARD IT HAD OPEN. Every
+# other part of the mod assumes the two boards are identical: strokes are mirrored as pixel ops onto
+# a board that is expected to match, undo/redo is a shared stack of whole-layer snapshots, and the
+# simulation is only deterministic for identical layers. So two players "on the same board" were in
+# fact editing two different boards from the first second — traces landed on different circuits and
+# an undo could hand a peer a board it had never had. (An earlier build papered over it by blanking
+# the HOST's board when it started hosting, which also threw away the host's work and still left the
+# joiner's own board in place.)
+#
+# On game start the host now pushes its whole board to every client, reusing the same proven
+# compressed-tile path as the manual consistency check (_serialize_tile / _rpc_apply_tiles), then
+# resets the shared undo/redo history on every peer so both re-baseline their stacks on those exact
+# pixels. ENet RPCs are reliable and ordered, so the history reset always lands after the tiles.
+func _on_game_started() -> void:
+	# A floating selection is pixels LIFTED OFF the pre-session board; committing it afterwards would
+	# stamp it into a board it never came from. Drop it on both sides before the handoff.
+	if _ensure_editor() and editor.has_method("clear_selection"):
+		editor.clear_selection()
+	if _remote_selection_tool == null:
+		_resolve_remote_selection_nodes()
+	if _remote_selection_tool != null and _remote_selection_tool.has_method("delete_selection"):
+		_remote_selection_tool.delete_selection()
+	if mp == null or not mp.is_host:
+		return  # a client just adopts what the host sends
+	host_push_full_board()
+
+
+func host_push_full_board() -> void:
+	if mp == null or not mp.is_host:
+		return
+	_push_full_board("Session start: sent the host board")
+
+
+# Ship OUR whole board to every peer, then re-baseline the shared undo/redo history on all of them so
+# nobody can undo into a board it never had. Used for the session-start handoff (host) and whenever a
+# peer replaces its board wholesale mid-session (New / Open — see _ev_fs_project_change).
+func _push_full_board(reason: String) -> void:
+	if not _ensure_editor() or not _ensure_digest_init():
+		return
+	var peer_ids = _get_remote_peer_ids()
+	if peer_ids.empty():
+		return
+	# Every tile is sent, including empty ones: an empty tile here may be a filled tile there, and it
+	# has to be cleared. Batches are capped by BOTH tile count and compressed bytes so a dense board
+	# never builds one enormous reliable packet.
+	var batch = []
+	var batch_bytes = 0
+	var sent = 0
+	for index in range(_tile_total):
+		var payload = _serialize_tile(index)
+		if payload.empty():
+			continue
+		batch.append(payload)
+		batch_bytes += (payload[1] as PoolByteArray).size()
+		if batch.size() >= _PUSH_TILES_PER_RPC or batch_bytes >= _PUSH_BYTES_PER_RPC:
+			sent += _send_tiles(peer_ids, batch)
+			batch = []
+			batch_bytes = 0
+	if not batch.empty():
+		sent += _send_tiles(peer_ids, batch)
+	# Re-baseline the shared history on the board we just sent.
+	_clear_local_history()
+	for peer_id in peer_ids:
+		rpc_id(peer_id, "_rpc_reset_history")
+	_log(reason + " (" + str(sent) + " tiles) and reset the shared history")
+
+
+func _send_tiles(peer_ids: Array, batch: Array) -> int:
+	for peer_id in peer_ids:
+		rpc_id(peer_id, "_rpc_apply_tiles", batch, _tile_total)
+	return batch.size()
+
+
 func _find_editor():
 	var root = get_tree().root
 	var main = root.get_node_or_null("Main")
@@ -430,7 +522,66 @@ func _ev_mi_mouse_input_on_board(_mode: int, args: Dictionary):
 		return
 	if not _ensure_editor():
 		return
-	_broadcast_mouse_input(_build_mouse_payload(args))
+	var payload = _build_mouse_payload(args)
+	if not _should_mirror_stroke_frame(args, payload):
+		return
+	_broadcast_mouse_input(payload)
+
+
+# Mirror ONLY the board frames the LOCAL editor actually acted on. MPDrawSync sees the same echo the
+# Editor does, but the Editor drops some of them — and every dropped frame we still sent was applied
+# on the peer as a stroke the sender never made:
+#   • with a popup focused (is_focused false) or outside the editor, the Editor ignores board input
+#     entirely;
+#   • a press that started off the board never set is_drawing, so its drag frames paint nothing
+#     locally;
+#   • a SHIFT/CTRL-constrained frame can resolve to the SAME pixel the tool last used, where vanilla
+#     draw() / select() returns without painting. Re-painting that pixel on the peer is NOT harmless:
+#     with Auto-cross on, the second pass sees the trace it just drew and turns it into CROSS pixels,
+#     so the peer's board ends up different from the sender's. (cursor_board only echoes a motion
+#     event when the raw pixel changed, so a repeated CONSTRAINED pixel is exactly that no-op case.)
+func _should_mirror_stroke_frame(args: Dictionary, payload: Dictionary) -> bool:
+	if payload.empty():
+		return false
+	if editor == null or not editor.is_in_editor or not editor.is_focused:
+		_local_stroke_active = false
+		return false
+	var pos = payload.get(E.mi_mouse_input_on_board.p_position, Vector2.ZERO)
+	if bool(args.get(E.mi_mouse_input_on_board.p_is_just_pressed, false)):
+		_local_stroke_active = true
+		_local_stroke_pos = pos
+		return true
+	if bool(args.get(E.mi_mouse_input_on_board.p_is_just_released, false)):
+		var was_active = _local_stroke_active
+		_local_stroke_active = false
+		return was_active  # a release only means something if we mirrored the press
+	# A held-drag frame: only if we are mid-stroke AND it moved the tool to a new pixel.
+	if not _local_stroke_active:
+		return false
+	if pos == _local_stroke_pos:
+		return false
+	_local_stroke_pos = pos
+	return true
+
+
+# Mirror a selection release that the Editor performed by CALLING ToolSelection.select() directly
+# (Editor._input does that for any mouse-button event outside the world frame). cursor_board never
+# echoes an event that lands outside the world frame, so nothing else can carry it: the local drag
+# ended but the peer's ToolSelectionRemote stayed stuck with is_dragging / is_selecting set, and its
+# next press was then mis-read as a drag. Called from the Editor extension's _input.
+func mirror_selection_release(position: Vector2, is_left_click: bool) -> void:
+	if _is_applying_remote_input or not _has_network_peer() or not _ensure_editor():
+		return
+	if not _local_stroke_active:
+		return  # nothing of ours is in flight — don't invent a release
+	_local_stroke_active = false
+	_broadcast_mouse_input(_build_mouse_payload({
+		E.mi_mouse_input_on_board.p_position: position,
+		E.mi_mouse_input_on_board.p_is_pressed: false,
+		E.mi_mouse_input_on_board.p_is_just_pressed: false,
+		E.mi_mouse_input_on_board.p_is_just_released: true,
+		E.mi_mouse_input_on_board.p_is_left_click: is_left_click,
+	}))
 
 
 func _should_sync_input(args: Dictionary) -> bool:
@@ -483,6 +634,11 @@ func _build_mouse_payload(args: Dictionary) -> Dictionary:
 		"p_paint_color": editor.paint_color,
 		"p_brush_state": brush_state,
 		"p_bucket_state": _get_bucket_state(),
+		# The ink FILTER is per-player editor state (like the brush), and the remote draw tool needs
+		# the SENDER's: it used to read this peer's own editor.filter, so if either player had a
+		# filter set, the other's strokes were filtered differently on each board — pixels silently
+		# dropped on one side, drawn on the other, and the two boards drifted apart.
+		"p_filter": editor.filter.duplicate(),
 		"p_is_drawing": is_drawing_now,
 		"p_is_remote": false,
 		# ALT held while pressing on an existing selection = drag-to-duplicate (mirrors the local
@@ -808,6 +964,21 @@ func _is_selection_mouse_active() -> bool:
 	if select_depth == null:
 		return true  # ToolSelection extension not installed — keep the old ambient-only behaviour
 	return int(select_depth) > 0
+
+
+# Our board was just replaced wholesale (New file, Open, a sample project, a dropped .vcb). In a live
+# session that would leave the two peers editing different boards from that moment on — every later
+# stroke, undo and simulation assumes they match — so hand the new board to the peer as well, exactly
+# like the session-start handoff. The receiving side applies raw tiles (no fs_project_change of its
+# own), so this can't bounce back.
+#
+# Only the LAYERS travel: the file's assembly, vmem contents and notes are not mirrored, so the peer
+# that opened the file keeps those to itself. Opening a project mid-session is still best done from
+# one side and announced.
+func _ev_fs_project_change(_mode: int, _args: Dictionary) -> void:
+	if _is_applying_remote_input or not _has_network_peer():
+		return
+	_push_full_board("Board replaced locally: pushed it to the other player")
 
 
 func _ev_ed_selection_paste_empty_cells_toggle(_mode: int, args: Dictionary):
@@ -1271,6 +1442,10 @@ func _flush_queued_remote_inputs():
 func _on_player_connected(id: int):
 	_log("Player " + str(id) + " connected")
 	_flush_queued_remote_inputs()
+	# Someone joining an ALREADY running session needs the board handoff too (in the normal flow the
+	# session isn't started yet at this point, so this is a no-op and game_started does the work).
+	if mp != null and mp.is_host and mp.is_game_started:
+		host_push_full_board()
 
 
 func _on_player_disconnected(id: int):

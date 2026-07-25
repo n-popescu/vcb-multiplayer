@@ -54,6 +54,11 @@ var pencil_size: = 8
 var pencil_pxs_filled: = [[0, 0]]
 var pencil_pxs_hollow: = [[0, 0]]
 var is_filter: = false
+# The SENDER's ink filter for the stroke being applied (Colors, like Editor.filter). paint_brush_pixels
+# used to read ED.filter — THIS peer's filter — so whenever either player had a filter set, the other's
+# stroke was filtered by the wrong list: pixels were dropped on one board and drawn on the other and
+# the two boards drifted apart. Always the sender's, carried per-stroke in the mouse payload.
+var remote_filter: = []
 
 var pb_color: = Color.white
 var pb_active_layer: Image
@@ -84,6 +89,7 @@ func reset_remote_state() -> void:
 	pencil_pxs_filled = [[0, 0]]
 	pencil_pxs_hollow = [[0, 0]]
 	is_filter = false
+	remote_filter = []
 	pb_color = Color.white
 	pb_active_layer = null
 	pb_is_logic_layer = false
@@ -114,7 +120,8 @@ func apply_brush_state(brush_state: Dictionary, editor_tool: int) -> void:
 	else:
 		update_pencil_pixels()
 
-func draw_remote(pixel: Vector2, is_just_pressed: bool, is_draw: bool, active_layer: int, indexed_color_id: String, paint_color: Color, editor_tool: int) -> void:
+func draw_remote(pixel: Vector2, is_just_pressed: bool, is_draw: bool, active_layer: int, indexed_color_id: String, paint_color: Color, editor_tool: int, sender_filter: Array = []) -> void:
+	remote_filter = sender_filter
 	if is_just_pressed:
 		first_pos = pixel
 		last_pos = pixel
@@ -164,6 +171,10 @@ func draw_remote(pixel: Vector2, is_just_pressed: bool, is_draw: bool, active_la
 			paint_brush_pixels(brush_pxs_hollow, Vector2(x0, y0))
 	ED.images[active_layer].unlock()
 	ED.images[Editor.LAYER.LOGIC].unlock()
+	# A peer's stroke changes OUR board too, so flag the file dirty exactly like a local stroke does
+	# (vanilla draw() echoes this). Without it, the autosave and the unsaved-changes prompt never saw
+	# the other player's work and you could close over it.
+	E.echo(E.fs_file_modify, {})
 	E.echo(E.ed_layers_resources_change, {
 		E.ed_layers_resources_change.p_layers: ED.images, })
 	last_pos = pixel
@@ -180,12 +191,12 @@ func paint_brush_pixels(p_brush_pxs: Array, p_root_px: Vector2) -> void:
 				if pb_is_multicolored:
 					pb_color = Color(TRACE_INKS_LIST[(pb_multicolored_index + i) % 16])
 				if is_auto_cross:
-					if px_ic != "00000000" and not pb_is_eraser_color and ED.filter.empty():
+					if px_ic != "00000000" and not pb_is_eraser_color and remote_filter.empty():
 						pb_active_layer.set_pixelv(xy, Color(C.PALETTE.CROSS.EDITOR))
 						continue
 		elif px_ic == "00000000":
 			continue
-		if not ED.filter.empty() and not Color(px_ic) in ED.filter:
+		if not remote_filter.empty() and not Color(px_ic) in remote_filter:
 			continue
 		pb_active_layer.set_pixelv(xy, pb_color)
 

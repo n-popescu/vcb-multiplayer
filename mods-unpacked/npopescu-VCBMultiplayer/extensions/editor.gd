@@ -12,6 +12,21 @@ extends "res://src/editor/editor.gd"
 var is_processing_remote_input: = false
 
 
+# Vanilla ends a selection gesture whose mouse-button event lands OUTSIDE the world frame by calling
+# ToolSelection.select() directly (cursor_board only echoes events inside the frame). That direct call
+# is invisible to MPDrawSync, so the peer's ToolSelectionRemote never learned the drag ended and stayed
+# stuck with is_dragging / is_selecting set — its next press was then mis-read as a drag of a selection
+# that no longer existed. Reproduce vanilla and mirror the release.
+func _input(event: InputEvent) -> void :
+	if event is InputEventMouseButton:
+		if not is_world_frame_context and (editor_tool == TOOL.SELECTION):
+			var is_left_click: bool = event.button_index == BUTTON_LEFT
+			$ToolSelection.select(last_mouse_pos, false, true, is_left_click)
+			var draw_sync = get_tree().root.get_node_or_null("/root/MPDrawSync")
+			if draw_sync != null and draw_sync.has_method("mirror_selection_release"):
+				draw_sync.mirror_selection_release(last_mouse_pos, is_left_click)
+
+
 func _ev_mi_mouse_input_on_board(_mode: int, _args: Dictionary) -> void :
 	var p_position: Vector2 = _args[E.mi_mouse_input_on_board.p_position]
 	var p_is_pressed: bool = _args[E.mi_mouse_input_on_board.p_is_pressed]
@@ -31,12 +46,14 @@ func _ev_mi_mouse_input_on_board(_mode: int, _args: Dictionary) -> void :
 		var remote_indexed_color_id = String(_args.get("p_indexed_color_id", indexed_color_id))
 		var remote_paint_color = _args.get("p_paint_color", paint_color) as Color
 		var remote_brush_state = _args.get("p_brush_state", {})
+		# The ink filter is the SENDER's (per-player editor state, like the brush) — never ours.
+		var remote_filter = _args.get("p_filter", [])
 		if remote_editor_tool in [Editor.TOOL.ARRAY, Editor.TOOL.PENCIL, Editor.TOOL.ERASER]:
 			remote_tool.apply_brush_state(remote_brush_state, remote_editor_tool)
 			var remote_is_drawing = bool(_args.get("p_is_drawing", false))
 			if not p_is_just_released and remote_is_drawing:
 				var is_draw = ((p_is_left_click) and (remote_editor_tool != Editor.TOOL.ERASER))
-				remote_tool.draw_remote(p_position, p_is_just_pressed, is_draw, remote_active_layer, remote_indexed_color_id, remote_paint_color, remote_editor_tool)
+				remote_tool.draw_remote(p_position, p_is_just_pressed, is_draw, remote_active_layer, remote_indexed_color_id, remote_paint_color, remote_editor_tool, remote_filter)
 			elif p_is_just_released:
 				# register remote stroke in history so undo works for remote ops
 				$History.public_register_state(remote_active_layer, false)
