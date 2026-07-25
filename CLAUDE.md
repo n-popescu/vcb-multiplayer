@@ -122,7 +122,24 @@ selection (a 1px-tall trace, size 1×N), so it applied locally and vanished on t
 Keep the selection RPC path free of per-frame `print()`: `ed_selection_area_change` fires on every
 motion frame of a drag, and a synchronous stdout write per frame is pure cost.
 
-## 6. Git / PR workflow for agents
+## 6. Remote cursor visibility vs camera zoom
+
+`MPDrawSync` renders a peer's cursor as a Sprite in **board space** (`World/CursorRemote/Sprite`,
+textured from their brush pixels), so it shrinks with the board: zoomed out, a 1px brush is a
+sub-pixel speck and the other player is invisible. `_update_remote_cursor_scale()` compensates by
+scaling that sprite once the camera is zoomed out past **`CURSOR_ZOOM_DETAIL_THRESHOLD = 0.072`** —
+deliberately the same number as `circuit_renderer.gd`'s `INK_SYMBOLS_OVERLAY_ZOOM_THRESHOLD`, i.e.
+the zoom at which the board stops drawing ink detail and becomes just colours. (Camera2D zoom GROWS
+as you zoom out, so `zoom < threshold` means close in.) From there on the marker holds the apparent
+size it had at that threshold (1 board px ≈ 1/0.072 ≈ 14 screen px).
+
+Two invariants to keep: it only ever **grows** a marker (`max(1.0, target / side)`), so a large brush
+keeps its true board footprint instead of ballooning across the screen; and it must be re-applied
+whenever the sprite's **texture** changes (the peer's brush size is part of the equation), not only on
+camera transforms. The event's `p_zoom` is UI-scale-normalized (`camera.gd::emit_transform`), which is
+what the renderer's threshold is expressed in too — compare like with like.
+
+## 7. Git / PR workflow for agents
 
 - Branch from `origin/main` (`git fetch origin main` first).
 - **Branch names MUST start with `claude/` and END WITH the current session id**, or `git push`

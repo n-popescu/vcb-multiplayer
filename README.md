@@ -31,6 +31,11 @@ build** of the mod. It is **pure GDScript + assets** — it loads at runtime fro
   while simulating, latch/button presses are synced so both boards stay identical.
 - Undo/redo is host-authoritative and shared. The Multiplayer window's **DEBUG** section has a
   host-only "Recheck board sync" (tiled anti-entropy) and a "Reset undo/redo history" button.
+- **The other player stays visible when you zoom out.** Their cursor lives in board space, so on a
+  zoomed-out board a small brush would shrink to a speck. Once the camera passes the point where the
+  board stops drawing ink detail and becomes just colours (the game's own ink-symbols threshold),
+  their cursor is scaled up to hold the on-screen size it had there, so you can always see where
+  they are. Zoomed in, nothing changes; a brush already bigger than that keeps its true footprint.
 
 ## Mod compatibility
 

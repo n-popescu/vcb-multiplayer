@@ -8,6 +8,21 @@ var _queued_remote_inputs = []
 var _remote_cursor_sprite: Sprite = null
 var _last_synced_cursor_pos: Vector2 = Vector2(-1, -1)
 var _cursor_board: Node2D = null  # for _process cursor sync
+# Zoom-compensated remote cursor. The remote cursor is a Sprite in BOARD space, so zooming out
+# shrinks it with the board: a 1-pixel brush becomes a sub-pixel speck and the other player is
+# effectively invisible on a zoomed-out board. Past a zoom-out threshold we scale the sprite up so it
+# keeps a constant ON-SCREEN size instead.
+#
+# The threshold is the game's own "the board stops showing ink detail and becomes just colours"
+# point: circuit_renderer.gd hides the ink-symbols overlay once the camera zoom passes
+# INK_SYMBOLS_OVERLAY_ZOOM_THRESHOLD (0.072 — note Camera2D zoom GROWS as you zoom out, so
+# zoom < threshold means close in). Zoomed in past it nothing changes; from there on out the marker
+# holds the apparent size it had exactly at that point (1 board pixel ≈ 1/0.072 ≈ 14 screen px).
+#
+# It only ever grows a marker, never shrinks one: a big brush already wider than that target keeps
+# its true board footprint, so a 64px brush doesn't balloon across the screen when you zoom out.
+const CURSOR_ZOOM_DETAIL_THRESHOLD: = 0.072
+var _camera_zoom: float = 0.1
 # Latest board-pixel cursor position received from each remote peer (peer id -> Vector2). Read by
 # the MP Players side-panel roster (mp_players_panel.gd) to show each other player's cursor position
 # + the ink under it. The single _remote_cursor_sprite still renders only the last mover (the P2P
@@ -1308,6 +1323,8 @@ remote func _rpc_apply_cursor_pixels(flat_pixels: Array, size: Vector2):
 	tex.create_from_image(new_img, 0)
 	_remote_cursor_sprite.texture = tex
 	_remote_cursor_sprite.offset = Vector2(-int(size_x / 2), -int(size_y / 2))
+	# The brush (and so the marker's board footprint) just changed — re-derive the zoom compensation.
+	_update_remote_cursor_scale()
 	_apply_remote_cursor_color(get_tree().get_rpc_sender_id())
 
 # The colour a remote peer renders in — its chosen hover colour (from MP), or legacy green.
@@ -1338,6 +1355,7 @@ func _resolve_remote_cursor_sprite() -> void:
 			# distinct color for remote cursor
 			_remote_cursor_sprite.modulate = Color(0.3, 1.0, 0.3, 0.55)  # greenish tint
 			_remote_cursor_sprite.visible = false
+			_update_remote_cursor_scale()
 			return
 	# Fallback: create the node structure if missing
 	_make_remote_cursor_node()
@@ -1368,6 +1386,7 @@ func _make_remote_cursor_node() -> void:
 	tex.create_from_image(img, 0)
 	_remote_cursor_sprite.texture = tex
 	_remote_cursor_sprite.offset = Vector2(0, 0)
+	_update_remote_cursor_scale()
 
 
 func _make_remote_cursor_texture() -> ImageTexture:
@@ -1437,10 +1456,30 @@ func _resolve_remote_selection_nodes() -> void:
 		_remote_selection_tool = editor.get_node_or_null("ToolSelectionRemote")
 
 func _ev_ot_camera_transform(_mode: int, args: Dictionary) -> void:
+	_camera_zoom = float(args.get(E.ot_camera_transform.p_zoom, _camera_zoom))
 	# Forward zoom to remote selection box so dashed line scales correctly
 	if _remote_selection_box:
-		var zoom = args.get(E.ot_camera_transform.p_zoom, 1.0)
-		_remote_selection_box.update_zoom(zoom)
+		_remote_selection_box.update_zoom(_camera_zoom)
+	# Keep the other player's cursor readable on a zoomed-out board (see the const above).
+	_update_remote_cursor_scale()
+
+
+# Scale the remote cursor sprite so that, once the camera is zoomed out past the board's
+# ink-detail threshold, the marker keeps the on-screen size it had at that threshold. Called on every
+# camera transform and whenever the sprite's texture changes (the peer's brush size can change).
+func _update_remote_cursor_scale() -> void:
+	if _remote_cursor_sprite == null or not is_instance_valid(_remote_cursor_sprite):
+		return
+	var factor: = 1.0
+	if _camera_zoom > CURSOR_ZOOM_DETAIL_THRESHOLD:
+		# Board pixels a 1px marker needs to cover to hold its threshold screen size.
+		var target: = _camera_zoom / CURSOR_ZOOM_DETAIL_THRESHOLD
+		var side: = 1.0
+		var tex: = _remote_cursor_sprite.texture
+		if tex != null:
+			side = max(1.0, max(float(tex.get_width()), float(tex.get_height())))
+		factor = max(1.0, target / side)  # only ever grow, never shrink a big brush
+	_remote_cursor_sprite.scale = Vector2(factor, factor)
 
 # These RPCs are received from the OTHER peer's mp_draw_sync when their
 # local ToolSelection emits ed_selection_area_change / ed_selection_image_change.
