@@ -771,6 +771,14 @@ func _local_selection_paint_layers() -> Array:
 # RPCs skip writing the remote tool state and the pasted blueprint never appears on the remote.
 # Requiring an active gesture flag (is_selecting/is_dragging/is_tiling, set by select()) also keeps
 # the release/capture behaviour unchanged (the button is already up on release → from_mouse false).
+#
+# The DECIDING test is the ToolSelection extension's _mp_select_depth: are we, right now, inside
+# select()? Ambient state alone was too loose and silently dropped ops on the peer — a keyboard op
+# (Ctrl+C / Ctrl+V / apply / delete / rotate) fired while a mouse button happened to be held, or a
+# stuck is_dragging/is_selecting flag from a release that never reached select(), both made a
+# NON-gesture change look like a gesture, so the receiver skipped adopting its area/image and the
+# whole op never landed there (the "fast copy-paste doesn't send every op" bug). Only a change
+# emitted from inside select() is the gesture select_remote actually replays.
 func _is_selection_mouse_active() -> bool:
 	if not (Input.is_mouse_button_pressed(BUTTON_LEFT) or Input.is_mouse_button_pressed(BUTTON_RIGHT)):
 		return false
@@ -779,7 +787,12 @@ func _is_selection_mouse_active() -> bool:
 	var local_sel = editor.get_node_or_null("ToolSelection")
 	if not local_sel:
 		return false
-	return local_sel.is_selecting or local_sel.is_dragging or local_sel.is_tiling
+	if not (local_sel.is_selecting or local_sel.is_dragging or local_sel.is_tiling):
+		return false
+	var select_depth = local_sel.get("_mp_select_depth")
+	if select_depth == null:
+		return true  # ToolSelection extension not installed — keep the old ambient-only behaviour
+	return int(select_depth) > 0
 
 
 func _ev_ed_selection_paste_empty_cells_toggle(_mode: int, args: Dictionary):
@@ -1433,7 +1446,6 @@ func _ev_ot_camera_transform(_mode: int, args: Dictionary) -> void:
 # local ToolSelection emits ed_selection_area_change / ed_selection_image_change.
 # We update our SelectionBoxRemote to show the other player's selection (green).
 remote func _rpc_apply_remote_selection_area(area: Rect2, tiles: Vector2, from_mouse: bool = false) -> void:
-	print("[MPDrawSync] _rpc_apply_remote_selection_area: area=", area, " tiles=", tiles)
 	if not _remote_selection_box:
 		_resolve_remote_selection_nodes()
 	if _remote_selection_box:
@@ -1453,7 +1465,6 @@ remote func _rpc_apply_remote_selection_area(area: Rect2, tiles: Vector2, from_m
 remote func _rpc_apply_remote_selection_image(img_data: PoolByteArray, width: int, height: int, from_mouse: bool = false,
 		p_on_data: PoolByteArray = PoolByteArray(), p_on_w: int = 0, p_on_h: int = 0,
 		p_off_data: PoolByteArray = PoolByteArray(), p_off_w: int = 0, p_off_h: int = 0) -> void:
-	print("[MPDrawSync] _rpc_apply_remote_selection_image: w=", width, " h=", height, " data_size=", img_data.size())
 	if not _remote_selection_box:
 		_resolve_remote_selection_nodes()
 	var img: Image = null

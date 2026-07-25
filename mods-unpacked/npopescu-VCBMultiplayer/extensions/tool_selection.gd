@@ -33,13 +33,46 @@ func _ev_ed_selection_paste(_mode: int, _args: Dictionary) -> void :
 	if ED.editor_tool == ED.TOOL.SELECTION:
 		paste_selection()
 
+# How deep we are inside select() — i.e. inside the MOUSE-driven selection path that the peer
+# reproduces on its ToolSelectionRemote via the mirrored raw board input. MPDrawSync's from_mouse gate
+# (_is_selection_mouse_active) reads this: only a selection area/image change emitted from INSIDE
+# select() belongs to that replayed gesture and must NOT overwrite the remote tool's state.
+#
+# Before this, the gate inferred "we're in a gesture" from ambient state (a mouse button held +
+# is_selecting/is_dragging/is_tiling). That misfired in two ways and SILENTLY DROPPED whole ops on
+# the peer, because from_mouse=true makes the receiver skip writing selection_area / selection_image
+# and skip the flush:
+#   • a KEYBOARD/menu op fired while the button happens to be held (Ctrl+C / Ctrl+V / apply / delete /
+#     rotate mid-drag — easy to hit when copy-pasting fast) is not replayed through select_remote at
+#     all, so its area/image never reached the peer: the paste simply never appeared there, and the
+#     auto-confirm that followed had nothing to stamp;
+#   • is_selecting/is_dragging/is_tiling can stay STUCK true when a release never reaches select()
+#     (Editor drops a release while is_drawing is false), poisoning every later op while any button
+#     is down.
+# A depth COUNTER, not a bool: apply_selection() ends with get_tree().input_event(...), which can
+# re-enter select() through Editor._input when the pointer is off the board.
+var _mp_select_depth: int = 0
+
+
 # vcb-mp fix: set is_selecting BEFORE the new-marquee area emit. The mod's from_mouse gate
 # (MPDrawSync._is_selection_mouse_active) keys on is_selecting/is_dragging/is_tiling to know a
 # live board gesture is in progress; vanilla emitted the first marquee area change while
 # is_selecting was still false, so the remote adopted a 1x1 selection_area and mis-detected a
 # drag (the selection only appeared on the remote once you moved it). This is the whole
 # vanilla select() reproduced verbatim with those two lines reordered (can't patch mid-func).
+#
+# The body lives in _mp_select_body so this wrapper can mark the mouse-driven path (see
+# _mp_select_depth) around every one of its early returns.
 func select(position: Vector2, is_just_pressed: bool, 
+			is_just_released: bool, is_left_click: bool) -> void :
+	_mp_select_depth += 1
+	_mp_select_body(position, is_just_pressed, is_just_released, is_left_click)
+	_mp_select_depth -= 1
+	if _mp_select_depth < 0:
+		_mp_select_depth = 0
+
+
+func _mp_select_body(position: Vector2, is_just_pressed: bool, 
 			is_just_released: bool, is_left_click: bool) -> void :
 	position.x = clamp(position.x, 0, int(ED.CIRCUIT_SPAN))
 	position.y = clamp(position.y, 0, int(ED.CIRCUIT_SPAN))

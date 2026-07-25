@@ -297,8 +297,15 @@ func clear_selection() -> void:
 # This handles copy/paste/re-apply on the local player's side correctly:
 # the remote board must receive the pixels that the local board already got.
 func flush_selection() -> void:
-	if selection_image != null and selection_area.size.x >= MIN_SELECTION_SIZE.x and selection_area.size.y >= MIN_SELECTION_SIZE.y:
-		apply_selection(_active_layer, true)
+	if selection_image == null:
+		return
+	# Mirror vanilla ToolSelection: a selection is degenerate (and discarded) only when BOTH sides are
+	# under the minimum — that is the empty sentinel Rect2(-1,-1,1,1). Requiring both sides to REACH
+	# the minimum instead refused to stamp any THIN selection (e.g. a 1px-tall trace, size 1xN), so
+	# copy/pasting one applied locally but was silently dropped on the peer.
+	if selection_area.size.x < MIN_SELECTION_SIZE.x and selection_area.size.y < MIN_SELECTION_SIZE.y:
+		return
+	apply_selection(_active_layer, true)
 
 # paste remote replay — called by mp_draw_sync when ed_selection_paste arrives from the peer.
 #

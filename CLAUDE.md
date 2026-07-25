@@ -87,7 +87,42 @@ mods-unpacked/npopescu-VCBMultiplayer/
 └── extensions/               one script extension per changed game script (NOT main.gd)
 ```
 
-## 5. Git / PR workflow for agents
+## 5. Selection sync: the `from_mouse` contract (read before touching it)
+
+A selection op reaches the peer over **two** channels and they must not fight:
+
+1. **Raw board input** (`_rpc_apply_mouse_input`) — replayed on the peer's `ToolSelectionRemote`
+   (`select_remote`), which lifts / moves / tiles / re-applies the pixels itself. This is what
+   mirrors a **mouse gesture**.
+2. **`ed_selection_area_change` / `ed_selection_image_change`** (`_rpc_apply_remote_selection_*`) —
+   always refresh the green `SelectionBoxRemote`, and additionally **write** the remote tool's
+   `selection_area` / `selection_tiles` / `selection_image` (and flush a floating one) **only when
+   `from_mouse == false`**. During a mouse gesture `select_remote` owns those fields; writing them
+   too made the moved copy drift by the last drag delta.
+
+`from_mouse` is computed by `MPDrawSync._is_selection_mouse_active()`. It must mean **"this change is
+being emitted from inside `ToolSelection.select()`"** — nothing looser. The deciding test is the
+`ToolSelection` extension's `_mp_select_depth` counter (bumped by the `select()` wrapper around
+`_mp_select_body`). Inferring it from ambient state (a mouse button held + `is_selecting` /
+`is_dragging` / `is_tiling`) silently DROPPED whole ops on the peer:
+
+- a **keyboard/menu op** (Ctrl+C, Ctrl+V, apply, delete, rotate) fired while a button happened to be
+  held is not replayed through `select_remote` at all, so with `from_mouse = true` its area/image was
+  never adopted — the paste never appeared on the peer and the auto-confirm that followed had nothing
+  to stamp (the "fast copy-paste doesn't send every op" bug);
+- `is_selecting` / `is_dragging` / `is_tiling` can stay **stuck true** when a release never reaches
+  `select()` (`Editor` drops a release while `is_drawing` is false, e.g. a popup stole focus
+  mid-gesture), which poisons every later op while any button is down.
+
+Related trap in `ToolSelectionRemote.flush_selection()`: the degenerate-selection guard must mirror
+vanilla — discard only when **both** sides are under `MIN_SELECTION_SIZE` (that's the empty sentinel
+`Rect2(-1,-1,1,1)`). Requiring both sides to reach the minimum refused to stamp any **thin**
+selection (a 1px-tall trace, size 1×N), so it applied locally and vanished on the peer.
+
+Keep the selection RPC path free of per-frame `print()`: `ed_selection_area_change` fires on every
+motion frame of a drag, and a synchronous stdout write per frame is pure cost.
+
+## 6. Git / PR workflow for agents
 
 - Branch from `origin/main` (`git fetch origin main` first).
 - **Branch names MUST start with `claude/` and END WITH the current session id**, or `git push`
